@@ -10,10 +10,21 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-- API: http://localhost:8000
-- Documentação interativa (Swagger): http://localhost:8000/docs
+- API: <http://localhost:8000>
+- Documentação interativa (Swagger): <http://localhost:8000/docs>
 
 > Ainda não há endpoints implementados.
+
+## Rodando com Docker
+
+```bash
+cd app
+docker build -t fundamentos-nuvem-api .
+docker run -p 8000:8000 fundamentos-nuvem-api
+```
+
+- API: <http://localhost:8000>
+- Documentação interativa (Swagger): <http://localhost:8000/docs>
 
 ## Estrutura
 
