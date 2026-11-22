@@ -422,7 +422,7 @@ Resources:
   AppTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${AWS::StackName}-tg
+      Name: !Sub ${AWS::StackName}-internal-tg
       VpcId: !Ref Vpc
       Protocol: HTTP
       Port: !Ref AppPort
@@ -444,7 +444,7 @@ Resources:
           Port: !Ref AppPort
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-tg
+          Value: !Sub ${AWS::StackName}-internal-tg
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
