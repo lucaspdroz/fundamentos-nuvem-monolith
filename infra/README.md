@@ -27,7 +27,7 @@ Com o lab desligado ou os secrets vencidos, o job de deploy falha (os outros job
 
 ## Como o deploy da API funciona
 
-1. `infra/scripts/deploy-stack.sh` cria/atualiza a stack `classmate` (`infra/cloudformation.yaml`). Se a stack estiver em `ROLLBACK_COMPLETE` (criação anterior falhou), ela é removida e recriada.
+1. `infra/scripts/deploy-stack.sh` cria/atualiza a stack `backend` (`infra/cloudformation.yaml`). Se a stack estiver em `ROLLBACK_COMPLETE` (criação anterior falhou), ela é removida e recriada.
 2. A imagem da API é buildada e enviada ao ECR da stack com as tags `<sha do commit>` e `latest`.
 3. `infra/scripts/rollout-api.sh` atualiza uma EC2 por vez via SSM: tira a instância do ALB, roda `/opt/classmate/deploy.sh <imagem>` (pull + restart do container), devolve ao ALB e espera ficar healthy. A outra AZ continua atendendo durante o deploy.
 
@@ -36,23 +36,23 @@ Ao subir pela primeira vez, as EC2 nascem antes da imagem existir no ECR; quem p
 ## Adicionando a sua stack (monitoramento, banco, frontend...)
 
 1. Crie o template em `infra/` (ex.: `infra/monitoring.yaml`). O `cfn-lint` passa a validá-lo automaticamente.
-2. No job `deploy` do workflow, adicione um passo depois de "Stack da API" (se depender dos exports dela) chamando o mesmo script:
+2. No job `deploy` do workflow, adicione um passo depois de "Stack do backend" (se depender dos exports dela) chamando o mesmo script:
 
    ```yaml
    - name: Stack de monitoramento
-     run: bash infra/scripts/deploy-stack.sh classmate-monitoring infra/monitoring.yaml GrafanaAllowedCidr=0.0.0.0/0
+     run: bash infra/scripts/deploy-stack.sh monitoring infra/monitoring.yaml GrafanaAllowedCidr=0.0.0.0/0
    ```
 
-   Parâmetros vão no formato `Chave=Valor` depois do template. Para usar a VPC, subnets e Security Groups da stack da API, importe os exports dela (`!ImportValue classmate-VpcId`, `classmate-PublicSubnetIds`, `classmate-MonitoringSecurityGroupId`, ...).
+   Parâmetros vão no formato `Chave=Valor` depois do template. Para usar a VPC, subnets e Security Groups da stack `backend`, importe os exports dela (`!ImportValue backend-VpcId`, `backend-PublicSubnetIds`, `backend-MonitoringSecurityGroupId`, ...).
 
 ## Deploy manual (sem o pipeline)
 
 Com as credenciais do Learner Lab configuradas no terminal:
 
 ```bash
-bash infra/scripts/deploy-stack.sh classmate infra/cloudformation.yaml
-REPO=$(aws cloudformation describe-stacks --stack-name classmate --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" --output text)
+bash infra/scripts/deploy-stack.sh backend infra/cloudformation.yaml
+REPO=$(aws cloudformation describe-stacks --stack-name backend --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" --output text)
 aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}"
 docker build -t "$REPO:manual" app && docker push "$REPO:manual"
-bash infra/scripts/rollout-api.sh classmate "$REPO:manual"
+bash infra/scripts/rollout-api.sh backend "$REPO:manual"
 ```

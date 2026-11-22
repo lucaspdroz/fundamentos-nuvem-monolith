@@ -14,7 +14,7 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  API_STACK_NAME: classmate
+  BACKEND_STACK_NAME: backend
 
 jobs:
   backend:
@@ -118,8 +118,8 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Stack da API
-        run: bash infra/scripts/deploy-stack.sh "$API_STACK_NAME" infra/cloudformation.yaml
+      - name: Stack do backend
+        run: bash infra/scripts/deploy-stack.sh "$BACKEND_STACK_NAME" infra/cloudformation.yaml
 
       - name: Login no ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -127,7 +127,7 @@ jobs:
       - name: Build e push da imagem da API
         run: |
           REPOSITORY_URI=$(aws cloudformation describe-stacks \
-            --stack-name "$API_STACK_NAME" \
+            --stack-name "$BACKEND_STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" \
             --output text)
           docker build -t "$REPOSITORY_URI:$GITHUB_SHA" -t "$REPOSITORY_URI:latest" app
@@ -135,12 +135,12 @@ jobs:
           echo "IMAGE_URI=$REPOSITORY_URI:$GITHUB_SHA" >> "$GITHUB_ENV"
 
       - name: Rolling deploy nas EC2
-        run: bash infra/scripts/rollout-api.sh "$API_STACK_NAME" "$IMAGE_URI"
+        run: bash infra/scripts/rollout-api.sh "$BACKEND_STACK_NAME" "$IMAGE_URI"
 
       - name: Verificar a API publicada
         run: |
           API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "$API_STACK_NAME" \
+            --stack-name "$BACKEND_STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
             --output text)
           curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "$API_URL/"
