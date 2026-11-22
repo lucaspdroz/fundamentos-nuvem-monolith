@@ -18,17 +18,18 @@ Todo recurso criado por uma stack usa o nome dela como prefixo: o backend cria `
 
 ## Pipeline (`.github/workflows/ci-cd.yml`)
 
-| Job | Quando roda | O que faz |
-| --- | --- | --- |
-| Backend | todo push e PR | instala dependências, roda os testes de `app/tests` (se existirem), verifica se a API sobe e builda a imagem Docker |
-| Frontend | desativado no momento (`if: false`) | `npm ci`, build e testes do Angular |
-| Infra | todo push e PR | `cfn-lint` em todos os templates `infra/**/*.yaml`, detecta quais stacks têm template e se a branch faz deploy |
-| Deploy backend | push na `main` ou em branch terminada em `-deploy` (ex.: `feature/login-deploy`) | stack `backend`, build/push da imagem no ECR e rolling deploy nas EC2 |
-| Deploy database | depois do backend, se existir `infra/database/cloudformation.yaml` | stack `database` |
-| Deploy monitoring | depois do database (ou do backend, se o database foi pulado), se existir `infra/monitoring/cloudformation.yaml` | stack `monitoring` |
-| Deploy frontend | depois do monitoring, se existir `infra/frontend/cloudformation.yaml` | stack `frontend` |
+Um job por stack, encadeados: **Backend → Database → Monitoring → Frontend**. Cada job cuida de tudo da sua área, da checagem ao deploy.
 
-Os jobs de deploy rodam encadeados na ordem backend → database → monitoring → frontend. Uma stack sem template aparece como pulada (skipped) e não bloqueia as seguintes; uma stack que falha interrompe as seguintes. O deploy do backend depende dos jobs Backend e Infra. O job Frontend está pulado (`if: false`) até o teste desatualizado `should render title` (`frontend/src/app/app.spec.ts`) ser corrigido; para reativar, remova essa linha do job.
+| Job | Checagem (todo push e PR) | Deploy (push na `main` ou em branch terminada em `-deploy`) |
+| --- | --- | --- |
+| Backend | dependências, testes de `app/tests` (se existirem), verifica se a API sobe, build da imagem e `cfn-lint` do template | stack `backend`, push da imagem no ECR e rolling deploy nas EC2 |
+| Database | `cfn-lint` de `infra/database/cloudformation.yaml` | stack `database` |
+| Monitoring | `cfn-lint` de `infra/monitoring/cloudformation.yaml` | stack `monitoring` |
+| Frontend | `cfn-lint` de `infra/frontend/cloudformation.yaml` | stack `frontend` |
+
+Se a pasta da área ainda não tem `cloudformation.yaml`, os passos do job são pulados e ele termina verde, sem bloquear os seguintes. Os jobs são independentes: cada um espera o anterior terminar (para manter a ordem), mas roda mesmo que o anterior tenha falhado. Só param se o run for cancelado.
+
+Em PR e em branches que não fazem deploy, só a checagem roda. Runs que fazem deploy entram numa fila única: se dois forem disparados juntos, o segundo espera o primeiro terminar.
 
 ## Credenciais do Learner Lab (obrigatório)
 
@@ -42,7 +43,7 @@ Antes de fazer merge/push na `main`:
    - `AWS_SECRET_ACCESS_KEY`
    - `AWS_SESSION_TOKEN`
 
-Com o lab desligado ou os secrets vencidos, o job de deploy falha (os outros jobs continuam funcionando). Depois de atualizar os secrets, rode de novo pelo botão **Run workflow** na `main`.
+Com o lab desligado ou os secrets vencidos, o job Backend falha no passo "Credenciais AWS" (a checagem antes dele continua funcionando) e os jobs seguintes não rodam. Depois de atualizar os secrets, rode de novo pelo botão **Run workflow** na `main`.
 
 ## Como o deploy da API funciona
 
@@ -55,18 +56,19 @@ Ao subir pela primeira vez, as EC2 nascem antes da imagem existir no ECR; quem p
 ## Adicionando a sua stack (banco, monitoramento, frontend)
 
 1. Crie o template na pasta da sua área: `infra/database/cloudformation.yaml`, `infra/monitoring/cloudformation.yaml` ou `infra/frontend/cloudformation.yaml`.
-2. Pronto: o `cfn-lint` passa a validá-lo e o job de deploy da sua área (`deploy-database`, `deploy-monitoring` ou `deploy-frontend`) deixa de ser pulado no próximo push.
+2. Pronto: no próximo push, o job da sua área (`database`, `monitoring` ou `frontend`) passa a validar o template e, numa branch de deploy, publicar a stack.
 
 Para usar a VPC, subnets e Security Groups da stack `backend`, importe os exports dela (`!ImportValue backend-VpcId`, `backend-PublicSubnetIds`, `backend-MonitoringSecurityGroupId`, ...).
 
-Se a sua stack precisar de parâmetros, coloque valores padrão (`Default`) no template ou adicione no passo do seu job no formato `Chave=Valor` depois do template:
+Se a sua stack precisar de parâmetros, coloque valores padrão (`Default`) no template ou adicione no passo "Deploy da stack" do seu job, no formato `Chave=Valor` depois do template:
 
 ```yaml
-- name: Stack do monitoring
-  run: bash infra/scripts/deploy-stack.sh monitoring infra/monitoring/cloudformation.yaml GrafanaAllowedCidr=0.0.0.0/0
+- name: Deploy da stack
+  if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+  run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE" GrafanaAllowedCidr=0.0.0.0/0
 ```
 
-Passos extras da sua área (por exemplo, enviar o build do Angular para um bucket S3 no frontend) entram no mesmo job, depois do passo da stack.
+Tudo o mais da sua área entra no mesmo job: dependências, build e testes antes da validação do template, e passos pós-deploy (por exemplo, enviar o build do Angular para um bucket S3) depois do "Deploy da stack", com o mesmo `if`.
 
 ## Deploy manual (sem o pipeline)
 
