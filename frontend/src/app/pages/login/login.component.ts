@@ -37,7 +37,9 @@ export class LoginComponent {
 
     try {
       const student = await firstValueFrom(
-        this.apiService.get<Partial<StudentProfile>>(`students/registration/${registration}`)
+        this.apiService.post<Partial<StudentProfile>, { registration: string }>('auth/login', {
+          registration,
+        })
       );
 
       if (this.hasCompleteProfile(student)) {

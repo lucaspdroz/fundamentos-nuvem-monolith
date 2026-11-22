@@ -1,0 +1,153 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - feature/backend-deploy-endpoints
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: us-east-1
+  API_STACK_NAME: classmate
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Testes
+        if: hashFiles('app/tests/**/test_*.py') != ''
+        run: |
+          pip install pytest
+          pytest
+
+      - name: Verificar se a API sobe
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
+        run: |
+          python - <<'EOF'
+          from fastapi.testclient import TestClient
+          import main
+
+          with TestClient(main.app) as client:
+              response = client.get("/")
+              assert response.status_code == 200, response.text
+              assert response.json() == {"status": "ok"}
+          print("API ok")
+          EOF
+
+      - name: Build da imagem Docker
+        run: docker build -t classmate-api:ci .
+
+  frontend:
+    name: Frontend
+    if: false
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Build
+        run: npx ng build
+
+      - name: Testes
+        run: npx ng test --watch=false
+
+  infra:
+    name: Infra (CloudFormation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Instalar cfn-lint
+        run: pip install cfn-lint
+
+      - name: Validar templates
+        run: cfn-lint "infra/**/*.yaml"
+
+  deploy:
+    name: Deploy na AWS
+    needs: [backend, infra]
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/backend-deploy-endpoints')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciais AWS (Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Stack da API
+        run: bash infra/scripts/deploy-stack.sh "$API_STACK_NAME" infra/cloudformation.yaml
+
+      - name: Login no ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build e push da imagem da API
+        run: |
+          REPOSITORY_URI=$(aws cloudformation describe-stacks \
+            --stack-name "$API_STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" \
+            --output text)
+          docker build -t "$REPOSITORY_URI:$GITHUB_SHA" -t "$REPOSITORY_URI:latest" app
+          docker push --all-tags "$REPOSITORY_URI"
+          echo "IMAGE_URI=$REPOSITORY_URI:$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Rolling deploy nas EC2
+        run: bash infra/scripts/rollout-api.sh "$API_STACK_NAME" "$IMAGE_URI"
+
+      - name: Verificar a API publicada
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$API_STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "$API_URL/"
+          {
+            echo "### Deploy concluído"
+            echo ""
+            echo "- API: $API_URL"
+            echo "- Swagger: $API_URL/docs"
+            echo "- Imagem: \`$IMAGE_URI\`"
+          } >> "$GITHUB_STEP_SUMMARY"
