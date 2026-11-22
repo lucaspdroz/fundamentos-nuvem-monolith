@@ -10,20 +10,24 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-cd-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || 'aws-deploy' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   AWS_REGION: us-east-1
-  BACKEND_STACK_NAME: backend
+  DEPLOY: >-
+    ${{ github.event_name != 'pull_request' &&
+    (github.ref == 'refs/heads/main' ||
+    github.ref == 'refs/heads/feature/backend-deploy-endpoints' ||
+    endsWith(github.ref_name, '-deploy')) }}
 
 jobs:
   backend:
     name: Backend
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: app
+    env:
+      STACK_NAME: backend
+      TEMPLATE: infra/backend/cloudformation.yaml
     steps:
       - uses: actions/checkout@v4
 
@@ -34,15 +38,18 @@ jobs:
           cache-dependency-path: app/requirements.txt
 
       - name: Instalar dependências
+        working-directory: app
         run: pip install -r requirements.txt
 
       - name: Testes
         if: hashFiles('app/tests/**/test_*.py') != ''
+        working-directory: app
         run: |
           pip install pytest
           pytest
 
       - name: Verificar se a API sobe
+        working-directory: app
         env:
           DATABASE_URL: "sqlite:///:memory:"
         run: |
@@ -58,90 +65,13 @@ jobs:
           EOF
 
       - name: Build da imagem Docker
-        run: docker build -t classmate-api:ci .
+        run: docker build -t "classmate-api:$GITHUB_SHA" app
 
-  frontend:
-    name: Frontend
-    if: false
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Instalar dependências
-        run: npm ci
-
-      - name: Build
-        run: npx ng build
-
-      - name: Testes
-        run: npx ng test --watch=false
-
-  infra:
-    name: Infra (CloudFormation)
-    runs-on: ubuntu-latest
-    outputs:
-      deploy: ${{ steps.deploy.outputs.enabled }}
-      backend: ${{ steps.stacks.outputs.backend }}
-      database: ${{ steps.stacks.outputs.database }}
-      monitoring: ${{ steps.stacks.outputs.monitoring }}
-      frontend: ${{ steps.stacks.outputs.frontend }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Instalar cfn-lint
-        run: pip install cfn-lint
-
-      - name: Validar templates
-        run: cfn-lint "infra/**/*.yaml"
-
-      - name: Detectar stacks
-        id: stacks
-        run: |
-          for stack in backend database monitoring frontend; do
-            if [ -f "infra/$stack/cloudformation.yaml" ]; then
-              echo "$stack=true" >> "$GITHUB_OUTPUT"
-              echo "$stack: infra/$stack/cloudformation.yaml"
-            else
-              echo "$stack=false" >> "$GITHUB_OUTPUT"
-              echo "$stack: sem template, deploy sera pulado"
-            fi
-          done
-
-      - name: Verificar se esta branch faz deploy
-        id: deploy
-        env:
-          ENABLED: >-
-            ${{ github.event_name != 'pull_request' &&
-            (github.ref == 'refs/heads/main' ||
-            github.ref == 'refs/heads/feature/backend-deploy-endpoints' ||
-            endsWith(github.ref_name, '-deploy')) }}
-        run: echo "enabled=$ENABLED" | tee -a "$GITHUB_OUTPUT"
-
-  deploy-backend:
-    name: Deploy backend
-    needs: [backend, infra]
-    if: needs.infra.outputs.deploy == 'true' && needs.infra.outputs.backend == 'true'
-    concurrency:
-      group: aws-stack-backend
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Validar template
+        run: pipx run cfn-lint "$TEMPLATE"
 
       - name: Credenciais AWS (Learner Lab)
+        if: env.DEPLOY == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -149,55 +79,73 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Stack do backend
-        run: bash infra/scripts/deploy-stack.sh "$BACKEND_STACK_NAME" infra/backend/cloudformation.yaml
+      - name: Deploy da stack
+        if: env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
 
       - name: Login no ECR
+        if: env.DEPLOY == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build e push da imagem da API
+      - name: Push da imagem da API
+        if: env.DEPLOY == 'true'
         run: |
           REPOSITORY_URI=$(aws cloudformation describe-stacks \
-            --stack-name "$BACKEND_STACK_NAME" \
+            --stack-name "$STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" \
             --output text)
-          docker build -t "$REPOSITORY_URI:$GITHUB_SHA" -t "$REPOSITORY_URI:latest" app
+          docker tag "classmate-api:$GITHUB_SHA" "$REPOSITORY_URI:$GITHUB_SHA"
+          docker tag "classmate-api:$GITHUB_SHA" "$REPOSITORY_URI:latest"
           docker push --all-tags "$REPOSITORY_URI"
           echo "IMAGE_URI=$REPOSITORY_URI:$GITHUB_SHA" >> "$GITHUB_ENV"
 
       - name: Rolling deploy nas EC2
-        run: bash infra/scripts/rollout-api.sh "$BACKEND_STACK_NAME" "$IMAGE_URI"
+        if: env.DEPLOY == 'true'
+        run: bash infra/scripts/rollout-api.sh "$STACK_NAME" "$IMAGE_URI"
 
       - name: Verificar a API publicada
+        if: env.DEPLOY == 'true'
         run: |
           API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "$BACKEND_STACK_NAME" \
+            --stack-name "$STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
             --output text)
           curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "$API_URL/"
           {
-            echo "### Deploy concluído"
+            echo "### Backend publicado"
             echo ""
             echo "- API: $API_URL"
             echo "- Swagger: $API_URL/docs"
             echo "- Imagem: \`$IMAGE_URI\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  deploy-database:
-    name: Deploy database
-    needs: [infra, deploy-backend]
-    if: >-
-      !cancelled() &&
-      needs.deploy-backend.result == 'success' &&
-      needs.infra.outputs.database == 'true'
-    concurrency:
-      group: aws-stack-database
-      cancel-in-progress: false
+  database:
+    name: Database
+    needs: backend
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      STACK_NAME: database
+      TEMPLATE: infra/database/cloudformation.yaml
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Database: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
       - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -205,25 +153,37 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Stack do database
-        run: bash infra/scripts/deploy-stack.sh database infra/database/cloudformation.yaml
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
 
-  deploy-monitoring:
-    name: Deploy monitoring
-    needs: [infra, deploy-backend, deploy-database]
-    if: >-
-      !cancelled() &&
-      needs.deploy-backend.result == 'success' &&
-      contains(fromJSON('["success", "skipped"]'), needs.deploy-database.result) &&
-      needs.infra.outputs.monitoring == 'true'
-    concurrency:
-      group: aws-stack-monitoring
-      cancel-in-progress: false
+  monitoring:
+    name: Monitoring
+    needs: database
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      STACK_NAME: monitoring
+      TEMPLATE: infra/monitoring/cloudformation.yaml
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Monitoring: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
       - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -231,26 +191,37 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Stack do monitoring
-        run: bash infra/scripts/deploy-stack.sh monitoring infra/monitoring/cloudformation.yaml
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
 
-  deploy-frontend:
-    name: Deploy frontend
-    needs: [infra, deploy-backend, deploy-database, deploy-monitoring]
-    if: >-
-      !cancelled() &&
-      needs.deploy-backend.result == 'success' &&
-      contains(fromJSON('["success", "skipped"]'), needs.deploy-database.result) &&
-      contains(fromJSON('["success", "skipped"]'), needs.deploy-monitoring.result) &&
-      needs.infra.outputs.frontend == 'true'
-    concurrency:
-      group: aws-stack-frontend
-      cancel-in-progress: false
+  frontend:
+    name: Frontend
+    needs: monitoring
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      STACK_NAME: frontend
+      TEMPLATE: infra/frontend/cloudformation.yaml
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Frontend: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
       - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -258,5 +229,14 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Stack do frontend
-        run: bash infra/scripts/deploy-stack.sh frontend infra/frontend/cloudformation.yaml
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
+
+  done:
+    name: Finalizado
+    needs: [backend, database, monitoring, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pipeline concluído
+        run: echo "Todas as etapas foram concluídas com sucesso"
