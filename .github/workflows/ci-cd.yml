@@ -106,16 +106,30 @@ jobs:
       - name: Verificar a API publicada
         if: env.DEPLOY == 'true'
         run: |
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          API_URL=$(output ApiUrl)
+          TARGET_GROUP_ARN=$(output AppTargetGroupArn)
+          aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --query "TargetHealthDescriptions[].[Target.Id, TargetHealth.State]" \
+            --output table
+          UNHEALTHY=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --query "length(TargetHealthDescriptions[?TargetHealth.State!='healthy'])" \
             --output text)
-          curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "$API_URL/"
+          if [ "$UNHEALTHY" != "0" ]; then
+            echo "Existem $UNHEALTHY instancias fora do ar no ALB" >&2
+            exit 1
+          fi
           {
             echo "### Backend publicado"
             echo ""
-            echo "- API: $API_URL"
-            echo "- Swagger: $API_URL/docs"
+            echo "- API (interna, somente dentro da VPC): $API_URL"
             echo "- Imagem: \`$IMAGE_URI\`"
           } >> "$GITHUB_STEP_SUMMARY"
 

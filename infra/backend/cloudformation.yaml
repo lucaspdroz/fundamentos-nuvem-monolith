@@ -224,13 +224,13 @@ Resources:
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: ALB - HTTP vindo da internet
+      GroupDescription: ALB interno - HTTP somente de dentro da VPC (frontend e recursos AWS)
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: !GetAtt Vpc.CidrBlock
       Tags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-alb-sg
@@ -402,22 +402,22 @@ Resources:
           Value: !Sub ${AWS::StackName}-app-b
 
   # ---------------------------------------------------------------------------
-  # Application Load Balancer (Multi-AZ)
+  # Application Load Balancer interno (Multi-AZ)
   # ---------------------------------------------------------------------------
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub ${AWS::StackName}-alb
+      Name: !Sub ${AWS::StackName}-internal-alb
       Type: application
-      Scheme: internet-facing
+      Scheme: internal
       Subnets:
-        - !Ref PublicSubnetA
-        - !Ref PublicSubnetB
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
       SecurityGroups:
         - !Ref AlbSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-alb
+          Value: !Sub ${AWS::StackName}-internal-alb
 
   AppTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -458,11 +458,13 @@ Resources:
 
 Outputs:
   ApiUrl:
-    Description: URL publica da API (via ALB)
+    Description: URL interna da API (acessivel somente de dentro da VPC)
     Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiUrl
 
   SwaggerUrl:
-    Description: Documentacao interativa da API
+    Description: Documentacao interativa da API (acessivel somente de dentro da VPC)
     Value: !Sub http://${ApplicationLoadBalancer.DNSName}/docs
 
   AppLogGroupName:
