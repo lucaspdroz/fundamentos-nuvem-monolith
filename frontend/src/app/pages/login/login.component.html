@@ -1,0 +1,49 @@
+<main class="login-screen">
+  <div class="login-container">
+    <!-- Identidade Visual -->
+    <header class="brand-header">
+      <div class="logo-badge" aria-hidden="true">
+        <span class="mate-icon">🧉</span>
+      </div>
+      <h1 class="brand-title">
+        class<span class="brand-highlight">Mate</span>
+      </h1>
+      <p class="brand-subtitle">Acesse sua área acadêmica</p>
+    </header>
+
+    <!-- Formulário -->
+    <form [formGroup]="loginForm" (ngSubmit)="onSubmit()" class="login-form" novalidate>
+      <div class="input-group">
+        <label for="registration" class="sr-only">Registration</label>
+        <input
+          id="registration"
+          type="text"
+          formControlName="registration"
+          placeholder="Registration"
+          autocomplete="username"
+          [class.input-error]="
+            loginForm.controls.registration.invalid && loginForm.controls.registration.touched
+          "
+        />
+        @if (loginForm.controls.registration.invalid && loginForm.controls.registration.touched) {
+          <span class="field-hint">Informe um número de matrícula válido.</span>
+        }
+      </div>
+
+      @if (errorMessage()) {
+        <div class="alert-error" role="alert">
+          {{ errorMessage() }}
+        </div>
+      }
+
+      <button type="submit" class="btn-enter" [disabled]="isLoading()">
+        @if (isLoading()) {
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Entering...</span>
+        } @else {
+          <span>Enter</span>
+        }
+      </button>
+    </form>
+  </div>
+</main>

@@ -1,0 +1,482 @@
+:host {
+  display: block;
+  min-height: 100dvh;
+  background-color: #f1f5f9;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dashboard-screen {
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.mobile-frame {
+  width: 100%;
+  max-width: 410px;
+  background: #ffffff;
+  border-radius: 28px;
+  padding: 1.25rem;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+/* Header */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.avatar-circle {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid #1e293b;
+  background: #eef5f0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.35rem;
+  overflow: hidden;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.bell-btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: none;
+  background: #1e293b;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+
+  .bell-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+.calendar-card {
+  padding: 0.35rem;
+
+  ::ng-deep .mat-calendar {
+    font-family: inherit;
+    width: 100%;
+
+    .mat-calendar-header {
+      padding: 0;
+    }
+
+    .mat-calendar-controls {
+      margin: 0;
+    }
+
+    .mat-calendar-table-header th {
+      font-size: 0.65rem;
+      padding: 0 0 4px;
+    }
+
+    .mat-calendar-body-label {
+      display: none;
+    }
+
+    /* Dias sem aula ficam discretos para focar nos dias letivos */
+    .day-non-class .mat-calendar-body-cell-content {
+      opacity: 0.3;
+    }
+
+    /* Hoje: pendente (vermelho) */
+    .day-today-pending .mat-calendar-body-cell-content {
+      background-color: #fee2e2 !important;
+      border: 2px solid #ef4444 !important;
+      color: #b91c1c !important;
+      font-weight: 700;
+    }
+
+    /* Hoje: presença confirmada (verde mate) */
+    .day-today-confirmed .mat-calendar-body-cell-content {
+      background-color: #2e6f40 !important;
+      border: 2px solid #1e4d2b !important;
+      color: #ffffff !important;
+      font-weight: 700;
+    }
+
+    /* Aulas anteriores com presença */
+    .day-present .mat-calendar-body-cell-content {
+      background-color: #dcfce7;
+      color: #166534;
+      font-weight: 600;
+    }
+
+    /* Aulas anteriores com falta */
+    .day-absent .mat-calendar-body-cell-content {
+      background-color: #fecaca;
+      color: #991b1b;
+      font-weight: 600;
+    }
+  }
+}
+
+/* Widgets Superiores */
+.widgets-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.widget-card {
+  border: 1.5px solid #cbd5e1;
+  border-radius: 18px;
+  padding: 0.75rem;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.widget-title {
+  margin: 0;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #2563eb;
+  text-transform: lowercase;
+}
+
+/* Calendário */
+.calendar-days-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.35rem;
+  justify-items: center;
+  align-items: center;
+}
+
+.day-pill {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-size: 0.78rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #1e293b;
+  transition: all 0.25s ease;
+
+  &.today-pending {
+    background-color: #fee2e2;
+    border: 2px solid #ef4444;
+    color: #b91c1c;
+    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.15);
+  }
+
+  &.today-confirmed {
+    background-color: #2e6f40; // Verde mate
+    border: 2px solid #1e4d2b;
+    color: #ffffff;
+    transform: scale(1.08);
+    box-shadow: 0 2px 8px rgba(46, 111, 64, 0.35);
+  }
+
+  &.past-absent {
+    color: #dc2626;
+  }
+
+  &.past-present {
+    color: #2e6f40;
+  }
+}
+
+/* Notificações */
+.notification-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.notification-pill {
+  padding: 0.45rem 0.6rem;
+  border-radius: 10px;
+  font-size: 0.73rem;
+  font-weight: 500;
+  line-height: 1.25;
+
+  &.pill-red {
+    background-color: #fecaca;
+    border: 1px solid #f87171;
+    color: #7f1d1d;
+  }
+
+  &.pill-blue {
+    background-color: #bae6fd;
+    border: 1px solid #38bdf8;
+    color: #0c4a6e;
+  }
+}
+
+/* Lista de Presença (Card Azul Central) */
+.attendance-panel {
+  flex: 1;
+  background: #dbeafe;
+  border: 1.5px solid #93c5fd;
+  border-radius: 22px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 290px;
+  max-height: 360px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  h3 {
+    margin: 0;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #1e3a8a;
+  }
+
+  .absence-counter {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: #eff6ff;
+    color: #1d4ed8;
+
+    &.danger {
+      background: #fee2e2;
+      color: #b91c1c;
+    }
+  }
+}
+
+.attendance-scroll {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-right: 0.2rem;
+}
+
+.attendance-row {
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 12px;
+  padding: 0.65rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border-left: 4px solid #2e6f40;
+
+  &.row-absent {
+    border-left-color: #ef4444;
+  }
+}
+
+.row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #0f172a;
+
+  .row-day {
+    color: #2563eb;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.row-status {
+  .tag {
+    display: inline-block;
+    font-size: 0.74rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+  }
+
+  .tag-present {
+    background: #dcfce7;
+    color: #166534;
+  }
+
+  .tag-today {
+    background: #fef3c7;
+    color: #92400e;
+  }
+
+  .tag-absent {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+}
+
+/* Botão Inferior */
+.btn-check-presence {
+  width: 100%;
+  height: 52px;
+  border-radius: 14px;
+  border: 1.5px solid #22c55e;
+  background-color: #bbf7d0;
+  color: #14532d;
+  font-size: 1.05rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background-color: #86efac;
+  }
+
+  &.confirmed {
+    background-color: #2e6f40;
+    border-color: #1e4d2b;
+    color: #ffffff;
+    cursor: default;
+  }
+
+  &:disabled:not(.confirmed) {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+/* Modal Crítico & Slide to Unlock */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  z-index: 50;
+}
+
+.alert-modal {
+  width: 100%;
+  max-width: 360px;
+  background: #ffffff;
+  border-radius: 24px;
+  padding: 1.75rem 1.5rem;
+  text-align: center;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+
+  .alert-icon {
+    font-size: 2.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.2rem;
+    color: #b91c1c;
+  }
+
+  p {
+    margin: 0 0 1.5rem;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    color: #334155;
+  }
+}
+
+.slide-unlock-container {
+  position: relative;
+  width: 100%;
+  height: 52px;
+  background: #f1f5f9;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.slide-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, #86efac, #2e6f40);
+  pointer-events: none;
+}
+
+.slide-label {
+  position: relative;
+  z-index: 1;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #475569;
+  pointer-events: none;
+  user-select: none;
+}
+
+.slide-range-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 1;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  z-index: 2;
+  cursor: grab;
+
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: #2e6f40;
+    border: 3px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    cursor: grab;
+  }
+
+  &::-moz-range-thumb {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: #2e6f40;
+    border: 3px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    cursor: grab;
+  }
+}

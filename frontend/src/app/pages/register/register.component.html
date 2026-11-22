@@ -1,0 +1,75 @@
+<main class="register-screen">
+  <div class="mobile-frame">
+    <!-- Círculo Superior do Wireframe (Preview do Avatar) -->
+    <header class="top-avatar-area">
+      <div class="avatar-preview" aria-label="Preview do avatar">
+        @if (registerForm.controls.avatar.value.startsWith('http')) {
+          <img [src]="registerForm.controls.avatar.value" alt="Avatar" />
+        } @else {
+          <span>{{ registerForm.controls.avatar.value || '🧉' }}</span>
+        }
+      </div>
+    </header>
+
+    <!-- Card Central com os campos do Wireframe -->
+    <section class="outer-card">
+      <form [formGroup]="registerForm" (ngSubmit)="onSubmit()" class="inner-form-card" novalidate>
+        <div class="field-group">
+          <label for="full_name">full_name</label>
+          <input id="full_name" type="text" formControlName="full_name" placeholder="Seu nome completo" />
+        </div>
+
+        <div class="field-group">
+          <label for="avatar">avatar</label>
+          <input id="avatar" type="text" formControlName="avatar" placeholder="Emoji ou URL da imagem" />
+        </div>
+
+        <div class="field-group">
+          <label for="presence">presence (datetime)</label>
+          <input id="presence" type="datetime-local" formControlName="presence" />
+        </div>
+
+        <div class="field-group">
+          <label for="course">course</label>
+          <input id="course" type="text" formControlName="course" placeholder="Ex: Engenharia de Software" />
+        </div>
+
+        <div class="field-group">
+          <label for="turn">turn</label>
+          <select id="turn" formControlName="turn">
+            <option value="Manhã">Manhã</option>
+            <option value="Tarde">Tarde</option>
+            <option value="Noite">Noite</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label for="room">room</label>
+          <input id="room" type="text" formControlName="room" placeholder="Ex: Lab 04 / Sala 202" />
+        </div>
+
+        <div class="field-group">
+          <label for="proffesor">proffesor</label>
+          <input id="proffesor" type="text" formControlName="proffesor" placeholder="Nome do professor" />
+        </div>
+
+        <div class="field-group">
+          <label for="created_at">created_at</label>
+          <input id="created_at" type="text" formControlName="created_at" />
+        </div>
+
+        @if (errorMessage()) {
+          <p class="error-msg">{{ errorMessage() }}</p>
+        }
+
+        <button type="submit" class="btn-save" [disabled]="isSubmitting()">
+          @if (isSubmitting()) {
+            Salvando...
+          } @else {
+            Salvar e continuar
+          }
+        </button>
+      </form>
+    </section>
+  </div>
+</main>
