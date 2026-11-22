@@ -1,0 +1,125 @@
+<main class="dashboard-screen">
+  <div class="mobile-frame">
+    <!-- Topo: Avatar + Sino de Notificação -->
+    <header class="top-bar">
+      <div class="avatar-circle" [title]="student()?.name || 'Aluno'">
+        @if (student()?.avatarUrl) {
+          <img [src]="student()?.avatarUrl" alt="Avatar do aluno" />
+        } @else {
+          <span>🧉</span>
+        }
+      </div>
+    </header>
+
+    <!-- Cards Superiores: Calendário de Aulas & Notificações -->
+    <section class="widgets-grid">
+      <!-- Calendário focado nos dias de aula -->
+      <article class="widget-card calendar-card">
+  <mat-calendar [dateClass]="dateClass" />
+</article>
+
+      <!-- Notificações Mockadas -->
+      <article class="widget-card notification-card">
+        <h2 class="widget-title">Notification</h2>
+        <div class="notification-list">
+          @for (note of notifications(); track note.id) {
+            <div
+              class="notification-pill"
+              [class.pill-red]="note.type === 'alert'"
+              [class.pill-blue]="note.type === 'info'"
+            >
+              {{ note.title }}
+            </div>
+          }
+        </div>
+      </article>
+    </section>
+
+    <!-- Lista de Presença do Semestre -->
+    <section class="attendance-panel" aria-label="Lista de presença do semestre">
+      <div class="panel-header">
+        <h3>Presenças do Semestre</h3>
+        <span class="absence-counter" [class.danger]="totalAbsences() > 5">
+          Faltas: {{ totalAbsences() }}
+        </span>
+      </div>
+
+      <div class="attendance-scroll">
+        @for (item of student()?.attendanceList; track item.id) {
+          <div class="attendance-row" [class.row-absent]="!item.present && !item.isToday">
+            <div class="row-main">
+              <span class="row-day">{{ formatDayLabel(item.date) }}</span>
+              <span class="row-separator">-</span>
+              <span class="row-class">{{ item.className }}</span>
+            </div>
+
+            <div class="row-status">
+              @if (item.isToday && !item.present) {
+                <span class="tag tag-today">Hoje (Pendente)</span>
+              } @else if (item.present) {
+                <span class="tag tag-present">Presente</span>
+              } @else {
+                <span class="tag tag-absent">
+                  Falta{{ item.absenceReason ? ' • ' + item.absenceReason : '' }}
+                </span>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    </section>
+
+    <!-- Botão Inferior: Check presence -->
+    <footer class="bottom-action">
+      <button
+        type="button"
+        class="btn-check-presence"
+        [class.confirmed]="isTodayConfirmed()"
+        [disabled]="isTodayConfirmed() || isCheckingIn()"
+        (click)="onCheckPresence()"
+      >
+        @if (isCheckingIn()) {
+          Confirming...
+        } @else if (isTodayConfirmed()) {
+          Presence checked ✓
+        } @else {
+          Check presence
+        }
+      </button>
+    </footer>
+  </div>
+
+  <!-- Modal Crítico (> 5 Faltas) com Slide-to-Unlock -->
+  @if (showAbsenceAlert()) {
+    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="alert-title">
+      <div class="alert-modal">
+        <div class="alert-icon">⚠️</div>
+        <h2 id="alert-title">Atenção ao limite de faltas!</h2>
+        <p>
+          Você já acumulou <strong>{{ totalAbsences() }} faltas</strong> neste semestre.
+          Evite novas ausências para não comprometer sua aprovação.
+        </p>
+
+        <div class="slide-unlock-container">
+          <div
+            class="slide-fill"
+            [style.width.%]="slideProgress()"
+          ></div>
+          <span class="slide-label" [style.opacity]="1 - slideProgress() / 100">
+            Deslize para confirmar leitura →
+          </span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            [value]="slideProgress()"
+            (input)="onSlideInput($event)"
+            (change)="onSlideRelease()"
+            aria-label="Deslize até o final para fechar o alerta"
+            class="slide-range-input"
+          />
+        </div>
+      </div>
+    </div>
+  }
+</main>
