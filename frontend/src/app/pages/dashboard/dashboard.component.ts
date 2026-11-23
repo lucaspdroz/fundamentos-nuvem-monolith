@@ -70,7 +70,9 @@ export class DashboardComponent implements OnInit {
   }
 
   private loadStudentData(): void {
-    this.apiService.get<StudentData>('students/me').subscribe({
+    const registration = (history.state as { student?: { registration?: string } })?.student
+      ?.registration;
+    this.apiService.get<StudentData>(`students/${registration}/presences`).subscribe({
       next: (data) => {
         // Garante conversão caso a API retorne string ISO
         data.attendanceList = data.attendanceList.map((item) => ({

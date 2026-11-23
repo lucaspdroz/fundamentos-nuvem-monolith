@@ -1,0 +1,256 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - feature/backend-deploy-endpoints
+      - "**-deploy"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || 'aws-deploy' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: us-east-1
+  DEPLOY: >-
+    ${{ github.event_name != 'pull_request' &&
+    (github.ref == 'refs/heads/main' ||
+    github.ref == 'refs/heads/feature/backend-deploy-endpoints' ||
+    endsWith(github.ref_name, '-deploy')) }}
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    env:
+      STACK_NAME: backend
+      TEMPLATE: infra/backend/cloudformation.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Instalar dependências
+        working-directory: app
+        run: pip install -r requirements.txt
+
+      - name: Testes
+        if: hashFiles('app/tests/**/test_*.py') != ''
+        working-directory: app
+        run: |
+          pip install pytest
+          pytest
+
+      - name: Verificar se a API sobe
+        working-directory: app
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
+        run: |
+          python - <<'EOF'
+          from fastapi.testclient import TestClient
+          import main
+
+          with TestClient(main.app) as client:
+              response = client.get("/")
+              assert response.status_code == 200, response.text
+              assert response.json() == {"status": "ok"}
+          print("API ok")
+          EOF
+
+      - name: Build da imagem Docker
+        run: docker build -t "classmate-api:$GITHUB_SHA" app
+
+      - name: Validar template
+        run: pipx run cfn-lint "$TEMPLATE"
+
+      - name: Credenciais AWS (Learner Lab)
+        if: env.DEPLOY == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy da stack
+        if: env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
+
+      - name: Login no ECR
+        if: env.DEPLOY == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push da imagem da API
+        if: env.DEPLOY == 'true'
+        run: |
+          REPOSITORY_URI=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiRepositoryUri'].OutputValue" \
+            --output text)
+          docker tag "classmate-api:$GITHUB_SHA" "$REPOSITORY_URI:$GITHUB_SHA"
+          docker tag "classmate-api:$GITHUB_SHA" "$REPOSITORY_URI:latest"
+          docker push --all-tags "$REPOSITORY_URI"
+          echo "IMAGE_URI=$REPOSITORY_URI:$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Rolling deploy nas EC2
+        if: env.DEPLOY == 'true'
+        run: bash infra/scripts/rollout-api.sh "$STACK_NAME" "$IMAGE_URI"
+
+      - name: Verificar a API publicada
+        if: env.DEPLOY == 'true'
+        run: |
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          API_URL=$(output ApiUrl)
+          TARGET_GROUP_ARN=$(output AppTargetGroupArn)
+          aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --query "TargetHealthDescriptions[].[Target.Id, TargetHealth.State]" \
+            --output table
+          UNHEALTHY=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --query "length(TargetHealthDescriptions[?TargetHealth.State!='healthy'])" \
+            --output text)
+          if [ "$UNHEALTHY" != "0" ]; then
+            echo "Existem $UNHEALTHY instancias fora do ar no ALB" >&2
+            exit 1
+          fi
+          {
+            echo "### Backend publicado"
+            echo ""
+            echo "- API (interna, somente dentro da VPC): $API_URL"
+            echo "- Imagem: \`$IMAGE_URI\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  database:
+    name: Database
+    needs: backend
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      STACK_NAME: database
+      TEMPLATE: infra/database/cloudformation.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Database: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
+      - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
+
+  monitoring:
+    name: Monitoring
+    needs: database
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      STACK_NAME: monitoring
+      TEMPLATE: infra/monitoring/cloudformation.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Monitoring: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
+      - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
+
+  frontend:
+    name: Frontend
+    needs: monitoring
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      STACK_NAME: frontend
+      TEMPLATE: infra/frontend/cloudformation.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar template
+        id: template
+        run: |
+          if [ -f "$TEMPLATE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "### Frontend: sem \`$TEMPLATE\`, etapa pulada" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validar template
+        if: steps.template.outputs.exists == 'true'
+        run: pipx run cfn-lint "$TEMPLATE"
+
+      - name: Credenciais AWS (Learner Lab)
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy da stack
+        if: steps.template.outputs.exists == 'true' && env.DEPLOY == 'true'
+        run: bash infra/scripts/deploy-stack.sh "$STACK_NAME" "$TEMPLATE"
+
+  done:
+    name: Finalizado
+    needs: [backend, database, monitoring, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pipeline concluído
+        run: echo "Todas as etapas foram concluídas com sucesso"

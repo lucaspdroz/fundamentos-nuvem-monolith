@@ -1,0 +1,525 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  classMate - backend Python (FastAPI) em EC2 Multi-AZ atras de um Application Load Balancer.
+
+Parameters:
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Tag da imagem da API no ECR usada no primeiro boot das EC2 (o pipeline publica latest e o SHA do commit)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small, t3.medium]
+    Description: Tipo das EC2 de aplicacao
+
+  KeyName:
+    Type: String
+    Default: vockey
+    Description: Key pair para SSH (no Learner Lab o padrao e "vockey"). Deixe vazio para nao usar.
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Instance profile ja existente no Learner Lab
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI Amazon Linux 2023 mais recente
+
+  AppPort:
+    Type: Number
+    Default: 8000
+    Description: Porta em que o container da API escuta
+
+  HealthCheckPath:
+    Type: String
+    Default: /
+    Description: Rota usada pelo health check do ALB
+
+  GrafanaPort:
+    Type: Number
+    Default: 3000
+    Description: Porta padrao do Grafana (EC2 de monitoramento)
+
+  GrafanaAllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Quem pode acessar o Grafana (troque pelo seu IP/32 para restringir)
+
+  DbPort:
+    Type: Number
+    Default: 5432
+    Description: Porta do banco (5432 = Aurora PostgreSQL, 3306 = Aurora MySQL).
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Rede
+  # ---------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-b
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-b
+
+  # ---------------------------------------------------------------------------
+  # NAT Gateway - DESATIVADO (mais caro)
+  # ---------------------------------------------------------------------------
+  # O NAT Gateway e o recurso mais caro desta stack: cobra por hora (~US$0,045/h)
+  # + por GB trafegado, e continua cobrando mesmo quando a sessao do Learner Lab
+  # termina (as EC2 param, o NAT nao). Por isso esta desativado.
+  #
+  # Consequencia: as subnets privadas nao tem saida para a internet, entao as
+  # EC2 de aplicacao foram colocadas nas subnets PUBLICAS (precisam baixar
+  # pacotes e a imagem do ECR). Elas continuam protegidas: o AppSecurityGroup
+  # so aceita trafego vindo do ALB e do monitoramento.
+  # As subnets privadas continuam aqui para o Aurora (que nao precisa de internet).
+  #
+  # Para reativar (EC2 nas subnets privadas, como no diagrama):
+  #   1. descomentar NatEip, NatGateway e PrivateDefaultRoute
+  #   2. nas EC2, trocar SubnetId para PrivateSubnetA/B e o DependsOn para
+  #      PrivateDefaultRoute + PrivateSubnetXRouteTableAssociation
+  #
+  # NatEip:
+  #   Type: AWS::EC2::EIP
+  #   DependsOn: VpcGatewayAttachment
+  #   Properties:
+  #     Domain: vpc
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub ${AWS::StackName}-nat-eip
+  #
+  # NatGateway:
+  #   Type: AWS::EC2::NatGateway
+  #   Properties:
+  #     AllocationId: !GetAtt NatEip.AllocationId
+  #     SubnetId: !Ref PublicSubnetA
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub ${AWS::StackName}-nat
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-rt
+
+  # Rota de saida das subnets privadas via NAT - desativada junto com o NAT Gateway.
+  # PrivateDefaultRoute:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable
+  #     DestinationCidrBlock: 0.0.0.0/0
+  #     NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------------------
+  # Security Groups
+  # ---------------------------------------------------------------------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB interno - HTTP somente de dentro da VPC (frontend e recursos AWS)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !GetAtt Vpc.CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-alb-sg
+
+  MonitoringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 de monitoramento - Grafana
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref GrafanaPort
+          ToPort: !Ref GrafanaPort
+          CidrIp: !Ref GrafanaAllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-monitoring-sg
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 de aplicacao - API acessivel pelo ALB e pelo monitoramento
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-sg
+
+  # Pronto para o Aurora: so aceita conexoes vindas da aplicacao e do monitoramento.
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Banco de dados - acessivel pela aplicacao e pelo monitoramento
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref DbPort
+          ToPort: !Ref DbPort
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+        - IpProtocol: tcp
+          FromPort: !Ref DbPort
+          ToPort: !Ref DbPort
+          SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-database-sg
+
+  # ---------------------------------------------------------------------------
+  # EC2 de aplicacao (uma por AZ)
+  # Nas subnets publicas porque o NAT Gateway esta desativado (ver comentario acima).
+  # ---------------------------------------------------------------------------
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /classmate/${AWS::StackName}/api
+      RetentionInDays: 7
+
+  ApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-api
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules": [{"rulePriority": 1, "description": "Manter as 10 imagens mais recentes",
+          "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10},
+          "action": {"type": "expire"}}]}
+
+  AppInstanceA:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - PublicDefaultRoute
+      - PublicSubnetARouteTableAssociation
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          mkdir -p /opt/classmate/data
+          cat > /opt/classmate/deploy.sh <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          IMAGE="$1"
+          aws ecr get-login-password --region ${AWS::Region} \
+            | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          docker pull "$IMAGE"
+          docker rm -f classmate-api || true
+          docker run -d --name classmate-api --restart unless-stopped \
+            -p ${AppPort}:8000 \
+            -v /opt/classmate/data:/app/data \
+            -e AWS_REGION=${AWS::Region} \
+            -e DATABASE_URL=sqlite:////app/data/classmate.db \
+            --log-driver awslogs \
+            --log-opt awslogs-region=${AWS::Region} \
+            --log-opt awslogs-group=${AppLogGroup} \
+            --log-opt awslogs-stream=app-a \
+            "$IMAGE"
+          docker image prune -f
+          SCRIPT
+          chmod +x /opt/classmate/deploy.sh
+          /opt/classmate/deploy.sh ${ApiRepository.RepositoryUri}:${ImageTag} \
+            || echo "Imagem ainda nao publicada no ECR; o pipeline faz o deploy"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-a
+
+  AppInstanceB:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - PublicDefaultRoute
+      - PublicSubnetBRouteTableAssociation
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          mkdir -p /opt/classmate/data
+          cat > /opt/classmate/deploy.sh <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          IMAGE="$1"
+          aws ecr get-login-password --region ${AWS::Region} \
+            | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          docker pull "$IMAGE"
+          docker rm -f classmate-api || true
+          docker run -d --name classmate-api --restart unless-stopped \
+            -p ${AppPort}:8000 \
+            -v /opt/classmate/data:/app/data \
+            -e AWS_REGION=${AWS::Region} \
+            -e DATABASE_URL=sqlite:////app/data/classmate.db \
+            --log-driver awslogs \
+            --log-opt awslogs-region=${AWS::Region} \
+            --log-opt awslogs-group=${AppLogGroup} \
+            --log-opt awslogs-stream=app-b \
+            "$IMAGE"
+          docker image prune -f
+          SCRIPT
+          chmod +x /opt/classmate/deploy.sh
+          /opt/classmate/deploy.sh ${ApiRepository.RepositoryUri}:${ImageTag} \
+            || echo "Imagem ainda nao publicada no ECR; o pipeline faz o deploy"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-b
+
+  # ---------------------------------------------------------------------------
+  # Application Load Balancer interno (Multi-AZ)
+  # ---------------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-internal-alb
+      Type: application
+      Scheme: internal
+      Subnets:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-internal-alb
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-internal-tg
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: !Ref AppPort
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Targets:
+        - Id: !Ref AppInstanceA
+          Port: !Ref AppPort
+        - Id: !Ref AppInstanceB
+          Port: !Ref AppPort
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-internal-tg
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+Outputs:
+  ApiUrl:
+    Description: URL interna da API (acessivel somente de dentro da VPC)
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiUrl
+
+  SwaggerUrl:
+    Description: Documentacao interativa da API (acessivel somente de dentro da VPC)
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}/docs
+
+  AppLogGroupName:
+    Description: Log Group do CloudWatch com os logs da API (data source CloudWatch no Grafana)
+    Value: !Ref AppLogGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-AppLogGroupName
+
+  ApiRepositoryUri:
+    Description: Repositorio ECR da imagem da API
+    Value: !GetAtt ApiRepository.RepositoryUri
+
+  AppInstanceIds:
+    Description: EC2 de aplicacao (usadas pelo pipeline no rolling deploy)
+    Value: !Join [",", [!Ref AppInstanceA, !Ref AppInstanceB]]
+
+  AppTargetGroupArn:
+    Description: Target Group da API no ALB
+    Value: !Ref AppTargetGroup
+
+  AppInstanceAPrivateIp:
+    Description: IP privado da EC2 de aplicacao na AZ a
+    Value: !GetAtt AppInstanceA.PrivateIp
+
+  AppInstanceBPrivateIp:
+    Description: IP privado da EC2 de aplicacao na AZ b
+    Value: !GetAtt AppInstanceB.PrivateIp
+
+  # Exports para quem for criar a EC2 de monitoramento e o Aurora em outra stack
+  VpcId:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+
+  PublicSubnetIds:
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetIds
+
+  PrivateSubnetIds:
+    Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetIds
+
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-AppSecurityGroupId
+
+  MonitoringSecurityGroupId:
+    Value: !Ref MonitoringSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-MonitoringSecurityGroupId
+
+  DatabaseSecurityGroupId:
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseSecurityGroupId
