@@ -4,7 +4,7 @@ Description: Stack RDS PostgreSQL com geracao automatica de senha no AWS Secrets
 Parameters:
   DbEngineVersion:
     Type: String
-    Default: '16.4'
+    Default: '17'
     Description: Versao do engine PostgreSQL
 
   DbInstanceClass:
