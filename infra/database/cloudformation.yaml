@@ -1,0 +1,103 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack RDS PostgreSQL com geracao automatica de senha no AWS Secrets Manager
+
+Parameters:
+  DbEngineVersion:
+    Type: String
+    Default: '17'
+    Description: Versao do engine PostgreSQL
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: Classe da instancia RDS
+
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    Description: Armazenamento inicial em GB
+
+  DbName:
+    Type: String
+    Default: appdb
+    Description: Nome inicial do banco de dados PostgreSQL
+
+  DbUsername:
+    Type: String
+    Default: postgres
+    Description: Usuario master do banco de dados
+
+Resources:
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}-postgres-credentials
+      Description: Credenciais geradas automaticamente para a instancia RDS PostgreSQL
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DbUsername}", "dbname": "${DbName}"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: '@/":\ '
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-postgres-credentials
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Sub-redes privadas importadas da stack backend
+      SubnetIds: !Split
+        - ','
+        - !ImportValue backend-PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-subnet-group
+
+  PostgresDbInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-postgres
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue backend-DatabaseSecurityGroupId
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-postgres
+
+Outputs:
+  DbInstanceId:
+    Value: !Ref PostgresDbInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-DbInstanceId
+
+  DbEndpointAddress:
+    Value: !GetAtt PostgresDbInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DbEndpointAddress
+
+  DbPort:
+    Value: !GetAtt PostgresDbInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-DbPort
+
+  DbName:
+    Value: !Ref DbName
+    Export:
+      Name: !Sub ${AWS::StackName}-DbName
+
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseSecretArn
