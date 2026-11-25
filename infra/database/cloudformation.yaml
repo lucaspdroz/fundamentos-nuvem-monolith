@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Stack de banco de dados relacional (Amazon RDS PostgreSQL)
+  importando rede e seguranca da stack backend.
+
+Parameters:
+  DbName:
+    Type: String
+    Default: classmate
+    Description: Nome do banco PostgreSQL criado na instancia RDS
+
+  DbUsername:
+    Type: String
+    Default: classmate_admin
+    Description: Usuario master do banco PostgreSQL
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Default: ClassMateDb2026
+    MinLength: 8
+    Description: >-
+      Senha master do banco PostgreSQL
+
+  DbPort:
+    Type: Number
+    Default: 5432
+    Description: Porta TCP do PostgreSQL no RDS
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t4g.micro
+      - db.t4g.small
+    Description: Classe da instancia RDS PostgreSQL
+
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 200
+    Description: Armazenamento inicial em GB (GP3)
+
+  DbEngineVersion:
+    Type: String
+    Default: "16.4"
+    Description: Versao do engine PostgreSQL disponivel na regiao
+
+  DbMultiAz:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Habilita Multi-AZ no RDS (true duplica custo de instancia/storage)
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${AWS::StackName}-db-subnet-group
+      DBSubnetGroupDescription: !Sub Sub-redes privadas para o banco da stack ${AWS::StackName}
+      SubnetIds:
+        - !Select
+          - 0
+          - !Split
+            - ","
+            - !ImportValue backend-PrivateSubnetIds
+        - !Select
+          - 1
+          - !Split
+            - ","
+            - !ImportValue backend-PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-subnet-group
+
+  PostgresDbInstance:
+    Type: AWS::RDS::DBInstance
+    DependsOn: DbSubnetGroup
+    Properties:
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-postgres
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp3
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue backend-DatabaseSecurityGroupId
+      Port: !Ref DbPort
+      PubliclyAccessible: false
+      MultiAZ: !Ref DbMultiAz
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-postgres
+
+Outputs:
+  DbInstanceId:
+    Description: Identificador da instancia RDS PostgreSQL
+    Value: !Ref PostgresDbInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-DbInstanceId
+
+  DbEndpointAddress:
+    Description: Host/endpoint do RDS PostgreSQL dentro da VPC
+    Value: !GetAtt PostgresDbInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DbEndpointAddress
+
+  DbPort:
+    Description: Porta do RDS PostgreSQL
+    Value: !Ref DbPort
+    Export:
+      Name: !Sub ${AWS::StackName}-DbPort
+
+  DbName:
+    Description: Nome do banco PostgreSQL
+    Value: !Ref DbName
+    Export:
+      Name: !Sub ${AWS::StackName}-DbName
