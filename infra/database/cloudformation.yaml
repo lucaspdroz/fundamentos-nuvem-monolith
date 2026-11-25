@@ -1,82 +1,59 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: >-
-  Stack de banco de dados relacional (Amazon RDS PostgreSQL)
-  importando rede e seguranca da stack backend.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack RDS PostgreSQL com geracao automatica de senha no AWS Secrets Manager
 
 Parameters:
-  DbName:
+  DbEngineVersion:
     Type: String
-    Default: classmate
-    Description: Nome do banco PostgreSQL criado na instancia RDS
-
-  DbUsername:
-    Type: String
-    Default: classmate_admin
-    Description: Usuario master do banco PostgreSQL
-
-  DbPassword:
-    Type: String
-    NoEcho: true
-    Default: ClassMateDb2026
-    MinLength: 8
-    Description: >-
-      Senha master do banco PostgreSQL
-
-  DbPort:
-    Type: Number
-    Default: 5432
-    Description: Porta TCP do PostgreSQL no RDS
+    Default: '16.4'
+    Description: Versao do engine PostgreSQL
 
   DbInstanceClass:
     Type: String
     Default: db.t3.micro
-    AllowedValues:
-      - db.t3.micro
-      - db.t3.small
-      - db.t4g.micro
-      - db.t4g.small
-    Description: Classe da instancia RDS PostgreSQL
+    Description: Classe da instancia RDS
 
   DbAllocatedStorage:
     Type: Number
     Default: 20
     MinValue: 20
-    MaxValue: 200
-    Description: Armazenamento inicial em GB (GP3)
+    Description: Armazenamento inicial em GB
 
-  DbEngineVersion:
+  DbName:
     Type: String
-    Default: "16.4"
-    Description: Versao do engine PostgreSQL disponivel na regiao
+    Default: appdb
+    Description: Nome inicial do banco de dados PostgreSQL
 
-  DbMultiAz:
+  DbUsername:
     Type: String
-    Default: "false"
-    AllowedValues:
-      - "true"
-      - "false"
-    Description: Habilita Multi-AZ no RDS (true duplica custo de instancia/storage)
+    Default: postgres
+    Description: Usuario master do banco de dados
 
 Resources:
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}-postgres-credentials
+      Description: Credenciais geradas automaticamente para a instancia RDS PostgreSQL
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DbUsername}", "dbname": "${DbName}"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: '@/":\ '
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-postgres-credentials
+
   DbSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupName: !Sub ${AWS::StackName}-db-subnet-group
-      DBSubnetGroupDescription: !Sub Sub-redes privadas para o banco da stack ${AWS::StackName}
-      SubnetIds:
-        - !Select
-          - 0
-          - !Split
-            - ","
-            - !ImportValue backend-PrivateSubnetIds
-        - !Select
-          - 1
-          - !Split
-            - ","
-            - !ImportValue backend-PrivateSubnetIds
+      DBSubnetGroupDescription: Sub-redes privadas importadas da stack backend
+      SubnetIds: !Split
+        - ','
+        - !ImportValue backend-PrivateSubnetIds
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-db-subnet-group
+          Value: !Sub ${AWS::StackName}-subnet-group
 
   PostgresDbInstance:
     Type: AWS::RDS::DBInstance
@@ -86,15 +63,13 @@ Resources:
       EngineVersion: !Ref DbEngineVersion
       DBInstanceClass: !Ref DbInstanceClass
       AllocatedStorage: !Ref DbAllocatedStorage
-      StorageType: gp3
       DBName: !Ref DbName
       MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Ref DbPassword # cfn-lint disable=w1011
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DbSubnetGroup
       VPCSecurityGroups:
         - !ImportValue backend-DatabaseSecurityGroupId
-      Port: !Ref DbPort
       PubliclyAccessible: false
-      MultiAZ: !Ref DbMultiAz
       BackupRetentionPeriod: 0
       DeletionProtection: false
       Tags:
@@ -103,25 +78,26 @@ Resources:
 
 Outputs:
   DbInstanceId:
-    Description: Identificador da instancia RDS PostgreSQL
     Value: !Ref PostgresDbInstance
     Export:
       Name: !Sub ${AWS::StackName}-DbInstanceId
 
   DbEndpointAddress:
-    Description: Host/endpoint do RDS PostgreSQL dentro da VPC
     Value: !GetAtt PostgresDbInstance.Endpoint.Address
     Export:
       Name: !Sub ${AWS::StackName}-DbEndpointAddress
 
   DbPort:
-    Description: Porta do RDS PostgreSQL
-    Value: !Ref DbPort
+    Value: !GetAtt PostgresDbInstance.Endpoint.Port
     Export:
       Name: !Sub ${AWS::StackName}-DbPort
 
   DbName:
-    Description: Nome do banco PostgreSQL
     Value: !Ref DbName
     Export:
       Name: !Sub ${AWS::StackName}-DbName
+
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseSecretArn
