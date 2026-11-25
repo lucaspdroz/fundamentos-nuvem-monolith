@@ -1,9 +1,22 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
+import { HttpErrorResponse } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { StudentProfile } from '../../models/student.model';
+
+interface StudentUpsertPayload {
+  registration: string;
+  full_name: string;
+  avatar: string;
+  course: string;
+  turn: string;
+  professor: boolean;
+  room?: string;
+  proffesor?: string;
+  presence?: string;
+}
 
 @Component({
   selector: 'app-register',
@@ -21,10 +34,10 @@ export class RegisterComponent implements OnInit {
   readonly errorMessage = signal<string | null>(null);
 
   private registration = '';
-  private existingId?: string;
+  private existingNumericId?: string | number;
+  private isProfessor = false;
   private existingCreatedAt?: Date;
 
-  // Timestamps iniciais em DateTime JS
   readonly now = new Date();
 
   readonly registerForm = this.fb.nonNullable.group({
@@ -44,11 +57,22 @@ export class RegisterComponent implements OnInit {
       existingStudent?: Partial<StudentProfile>;
     };
 
-    this.registration = state?.registration ?? '';
-    const existing = state?.existingStudent;
+    this.registration = String(
+      state?.registration || localStorage.getItem('student_id') || ''
+    );
 
-    if (existing) {
-      this.existingId = existing.id;
+    if (!this.registration) {
+      this.router.navigate(['/']);
+      return;
+    }
+
+    const storedPartial = sessionStorage.getItem('partial_student');
+    const existing: Partial<StudentProfile> | undefined =
+      state?.existingStudent ?? (storedPartial ? JSON.parse(storedPartial) : undefined);
+
+    if (existing && Object.keys(existing).length > 0) {
+      this.existingNumericId = existing.id;
+      this.isProfessor = Boolean(existing.professor);
       this.existingCreatedAt = existing.created_at ? new Date(existing.created_at) : this.now;
 
       this.registerForm.patchValue({
@@ -77,37 +101,67 @@ export class RegisterComponent implements OnInit {
 
     const raw = this.registerForm.getRawValue();
 
-    const payload: StudentProfile = {
+    const payload: StudentUpsertPayload = {
       registration: this.registration,
       full_name: raw.full_name.trim(),
       avatar: raw.avatar.trim(),
-      presence: new Date(raw.presence),
       course: raw.course.trim(),
       turn: raw.turn,
+      professor: this.isProfessor,
       room: raw.room.trim(),
       proffesor: raw.proffesor.trim(),
-      created_at: this.existingCreatedAt ?? new Date(),
+      presence: new Date(raw.presence).toISOString(),
     };
 
     try {
-      const savedStudent = this.existingId
-        ? await firstValueFrom(
-            this.apiService.update<StudentProfile, StudentProfile>(
-              `students/${this.existingId}`,
-              payload
+      const savedStudent =
+        this.existingNumericId !== undefined
+          ? await firstValueFrom(
+              this.apiService.update<StudentProfile, StudentUpsertPayload>(
+                `students/${this.existingNumericId}`,
+                payload
+              )
             )
-          )
-        : await firstValueFrom(
-            this.apiService.post<StudentProfile, StudentProfile>('students', payload)
-          );
+          : await firstValueFrom(
+              this.apiService.post<StudentProfile, StudentUpsertPayload>('students', payload)
+            );
 
-      await this.router.navigate(['/dashboard'], { state: { student: savedStudent } });
-    } catch {
-      // Fallback caso o backend ainda não esteja ativo, permitindo testar o fluxo
-      await this.router.navigate(['/dashboard'], { state: { student: payload } });
+      await this.finishAndRedirect(savedStudent);
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 409) {
+        try {
+          const allStudents = await firstValueFrom(
+            this.apiService.get<StudentProfile[]>('students')
+          );
+          const existing = allStudents?.find((s) => s.registration === this.registration);
+
+          if (existing) {
+            await this.finishAndRedirect(existing);
+            return;
+          }
+        } catch {
+          // Segue para exibição da mensagem abaixo se falhar
+        }
+
+        this.errorMessage.set('Esta matrícula já está cadastrada no sistema.');
+        return;
+      }
+
+      this.errorMessage.set('Erro ao salvar os dados do aluno. Verifique a conexão com a API.');
     } finally {
       this.isSubmitting.set(false);
     }
+  }
+
+  private async finishAndRedirect(user: StudentProfile): Promise<void> {
+    sessionStorage.removeItem('partial_student');
+    localStorage.setItem('student_id', String(user.id ?? this.registration));
+    localStorage.setItem('student_registration', user.registration ?? this.registration);
+
+    const targetRoute = user.professor ? '/dashboard-professor' : '/dashboard';
+    await this.router.navigate([targetRoute], {
+      state: { student: user },
+    });
   }
 
   private toDateTimeLocalString(date: Date): string {
