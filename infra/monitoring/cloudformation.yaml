@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  classMate - monitoramento: EC2 com Grafana lendo as metricas do CloudWatch
+  (ALB, EC2 e banco), com data source e dashboard provisionados automaticamente.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+    Description: Tipo da EC2 do Grafana (t3.micro fica sem memoria ao instalar o Grafana)
+
+  KeyName:
+    Type: String
+    Default: vockey
+    Description: Key pair para SSH (no Learner Lab o padrao e "vockey"). Deixe vazio para nao usar.
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Instance profile ja existente no Learner Lab (da leitura do CloudWatch)
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI Amazon Linux 2023 mais recente
+
+  NetworkStackName:
+    Type: String
+    Default: backend
+    Description: Stack que exporta a VPC, as subnets e os Security Groups
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+  GrafanaInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Select [0, !Split [",", !ImportValue {"Fn::Sub": "${NetworkStackName}-PublicSubnetIds"}]]
+      SecurityGroupIds:
+        - !ImportValue {"Fn::Sub": "${NetworkStackName}-MonitoringSecurityGroupId"}
+      Monitoring: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          # Swap de 2 GB: sem ele o dnf pode ficar sem memoria ao instalar o Grafana
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+
+          cat > /etc/yum.repos.d/grafana.repo <<'EOF'
+          [grafana]
+          name=grafana
+          baseurl=https://rpm.grafana.com
+          repo_gpgcheck=1
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://rpm.grafana.com/gpg.key
+          sslverify=1
+          sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+          EOF
+          dnf install -y grafana
+
+          # Data source CloudWatch (usa a role da instancia, sem chaves)
+          mkdir -p /etc/grafana/provisioning/datasources
+          cat > /etc/grafana/provisioning/datasources/cloudwatch.yaml <<'EOF'
+          apiVersion: 1
+          datasources:
+            - name: CloudWatch
+              type: cloudwatch
+              uid: cloudwatch
+              isDefault: true
+              jsonData:
+                authType: default
+                defaultRegion: ${AWS::Region}
+          EOF
+
+          # Dashboard provisionado (ALB, EC2 e banco)
+          mkdir -p /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+          cat > /etc/grafana/provisioning/dashboards/classmate.yaml <<'EOF'
+          apiVersion: 1
+          providers:
+            - name: classmate
+              folder: Trabalho Final
+              type: file
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+          cat > /var/lib/grafana/dashboards/monitoramento.json <<'EOF'
+          {"title":"Trabalho Final - Monitoramento EC2 + ALB + RDS","uid":"trabalho-final-aws","schemaVersion":39,"version":2,"editable":true,"time":{"from":"now-1h","to":"now"},"refresh":"1m","tags":["aws","ec2","alb","trabalho-final","rds"],"templating":{"list":[{"name":"region","label":"Região","type":"query","datasource":{"type":"cloudwatch","uid":"cloudwatch"},"query":"regions()","refresh":1,"current":{"text":"default","value":"default"}},{"name":"instance","label":"Instâncias","type":"query","datasource":{"type":"cloudwatch","uid":"cloudwatch"},"query":"dimension_values($region, AWS/EC2, CPUUtilization, InstanceId)","refresh":2,"multi":true,"includeAll":true,"current":{"text":"All","value":"$__all"}},{"name":"alb","label":"Load Balancer","type":"query","datasource":{"type":"cloudwatch","uid":"cloudwatch"},"query":"dimension_values($region, AWS/ApplicationELB, RequestCount, LoadBalancer)","refresh":2},{"name":"tg","label":"Target Group","type":"query","datasource":{"type":"cloudwatch","uid":"cloudwatch"},"query":"dimension_values($region, AWS/ApplicationELB, HealthyHostCount, TargetGroup)","refresh":2},{"name":"db","label":"Banco (RDS)","type":"query","datasource":{"type":"cloudwatch","uid":"cloudwatch"},"query":"dimension_values($region, AWS/RDS, CPUUtilization, DBInstanceIdentifier)","refresh":2}]},"panels":[{"type":"row","title":"Load Balancer (HA Multi-AZ)","collapsed":false,"gridPos":{"h":1,"w":24,"x":0,"y":0},"id":100},{"id":1,"type":"timeseries","title":"Hosts saudáveis por AZ","gridPos":{"h":8,"w":12,"x":0,"y":1},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"min":0,"decimals":0},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"HealthyHostCount","dimensions":{"LoadBalancer":"$alb","TargetGroup":"$tg","AvailabilityZone":"*"},"matchExact":true,"statistic":"Minimum","period":"60","label":"Saudáveis - ${!PROP('Dim.AvailabilityZone')}"},{"refId":"B","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"UnHealthyHostCount","dimensions":{"LoadBalancer":"$alb","TargetGroup":"$tg","AvailabilityZone":"*"},"matchExact":true,"statistic":"Maximum","period":"60","label":"Com falha - ${!PROP('Dim.AvailabilityZone')}"}]},{"id":2,"type":"timeseries","title":"Requisições no ALB","gridPos":{"h":8,"w":12,"x":12,"y":1},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"RequestCount","dimensions":{"LoadBalancer":"$alb"},"matchExact":true,"statistic":"Sum","period":"60","label":"Requisições/min"}]},{"id":3,"type":"timeseries","title":"Tempo de resposta (s)","gridPos":{"h":8,"w":12,"x":0,"y":9},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"s"},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"TargetResponseTime","dimensions":{"LoadBalancer":"$alb"},"matchExact":true,"statistic":"Average","period":"60","label":"Média"}]},{"id":4,"type":"timeseries","title":"Erros HTTP","gridPos":{"h":8,"w":12,"x":12,"y":9},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"HTTPCode_Target_5XX_Count","dimensions":{"LoadBalancer":"$alb"},"matchExact":true,"statistic":"Sum","period":"60","label":"5XX (aplicação)"},{"refId":"B","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/ApplicationELB","metricName":"HTTPCode_Target_4XX_Count","dimensions":{"LoadBalancer":"$alb"},"matchExact":true,"statistic":"Sum","period":"60","label":"4XX (aplicação)"}]},{"type":"row","title":"Instâncias EC2","collapsed":false,"gridPos":{"h":1,"w":24,"x":0,"y":17},"id":101},{"id":5,"type":"timeseries","title":"CPU por instância (%)","gridPos":{"h":8,"w":12,"x":0,"y":18},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"percent","min":0,"max":100},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/EC2","metricName":"CPUUtilization","dimensions":{"InstanceId":"$instance"},"matchExact":true,"statistic":"Average","period":"60","label":"${!PROP('Dim.InstanceId')}"}]},{"id":6,"type":"timeseries","title":"Rede (entrada / saída)","gridPos":{"h":8,"w":12,"x":12,"y":18},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"bytes"},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/EC2","metricName":"NetworkIn","dimensions":{"InstanceId":"$instance"},"matchExact":true,"statistic":"Sum","period":"60","label":"In - ${!PROP('Dim.InstanceId')}"},{"refId":"B","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/EC2","metricName":"NetworkOut","dimensions":{"InstanceId":"$instance"},"matchExact":true,"statistic":"Sum","period":"60","label":"Out - ${!PROP('Dim.InstanceId')}"}]},{"id":7,"type":"stat","title":"Falhas de status check","gridPos":{"h":6,"w":24,"x":0,"y":26},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"decimals":0,"thresholds":{"mode":"absolute","steps":[{"color":"green","value":null},{"color":"red","value":1}]}},"overrides":[]},"options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/EC2","metricName":"StatusCheckFailed","dimensions":{"InstanceId":"$instance"},"matchExact":true,"statistic":"Maximum","period":"60","label":"${!PROP('Dim.InstanceId')}"}]},{"type":"row","title":"Banco de dados (RDS PostgreSQL)","collapsed":false,"gridPos":{"h":1,"w":24,"x":0,"y":32},"id":102},{"id":8,"type":"timeseries","title":"CPU do banco (%)","gridPos":{"h":8,"w":12,"x":0,"y":33},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"percent","min":0,"max":100},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"CPUUtilization","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Average","period":"60","label":"CPU"}]},{"id":9,"type":"timeseries","title":"Conexões ativas","gridPos":{"h":8,"w":12,"x":12,"y":33},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"decimals":0,"min":0},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"DatabaseConnections","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Maximum","period":"60","label":"Conexões"}]},{"id":10,"type":"timeseries","title":"Memória livre","gridPos":{"h":8,"w":8,"x":0,"y":41},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"bytes"},"overrides":[]},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"FreeableMemory","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Average","period":"60","label":"Memória livre"}]},{"id":11,"type":"stat","title":"Espaço livre em disco","gridPos":{"h":8,"w":8,"x":8,"y":41},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"fieldConfig":{"defaults":{"unit":"bytes"},"overrides":[]},"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"FreeStorageSpace","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Average","period":"60","label":"Livre"}]},{"id":12,"type":"timeseries","title":"Leituras / gravações (IOPS)","gridPos":{"h":8,"w":8,"x":16,"y":41},"datasource":{"type":"cloudwatch","uid":"cloudwatch"},"targets":[{"refId":"A","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"ReadIOPS","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Average","period":"60","label":"Leitura"},{"refId":"B","queryMode":"Metrics","metricQueryType":0,"metricEditorMode":0,"region":"$region","namespace":"AWS/RDS","metricName":"WriteIOPS","dimensions":{"DBInstanceIdentifier":"$db"},"matchExact":true,"statistic":"Average","period":"60","label":"Gravação"}]}]}
+          EOF
+          chown -R grafana:grafana /var/lib/grafana/dashboards
+
+          systemctl enable --now grafana-server
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-grafana
+
+Outputs:
+  GrafanaUrl:
+    Description: Endereco do Grafana (login inicial admin / admin, troque no primeiro acesso)
+    Value: !Sub http://${GrafanaInstance.PublicIp}:3000
+
+  GrafanaInstanceId:
+    Description: EC2 do Grafana
+    Value: !Ref GrafanaInstance
