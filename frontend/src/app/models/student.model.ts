@@ -16,20 +16,31 @@ export interface StudentData {
 }
 
 export interface StudentProfile {
-  id?: string;
+  id?: string | number;
   registration: string;
   full_name: string;
   avatar: string;
-  presence: Date;
   course: string;
   turn: string;
-  room: string;
-  proffesor: string;
-  created_at: Date;
+  professor?: boolean;
+  proffesor?: string;
+  room?: string;
+  presence?: Date | string;
+  created_at?: Date | string;
+  updated_at?: Date | string;
 }
 
 export interface ReminderNotification {
   id: string;
   title: string;
   type: 'alert' | 'info';
+}
+
+export interface ClassStudentRow {
+  id: string | number;
+  registration: string;
+  full_name: string;
+  avatar: string;
+  presentToday: boolean;
+  lastCheckIn?: Date;
 }

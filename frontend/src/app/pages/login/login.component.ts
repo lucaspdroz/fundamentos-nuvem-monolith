@@ -1,6 +1,7 @@
 import { Component, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
+import { HttpErrorResponse } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { StudentProfile } from '../../models/student.model';
@@ -21,7 +22,7 @@ export class LoginComponent {
   readonly errorMessage = signal<string | null>(null);
 
   readonly loginForm = this.fb.nonNullable.group({
-    registration: ['', [Validators.required, Validators.minLength(4)]],
+    registration: ['', [Validators.required, Validators.minLength(1)]],
   });
 
   async onSubmit(): Promise<void> {
@@ -33,42 +34,58 @@ export class LoginComponent {
     this.isLoading.set(true);
     this.errorMessage.set(null);
 
+    // Limpa estado anterior antes de validar a nova matrícula
+    localStorage.removeItem('current_user');
+    localStorage.removeItem('student_id');
+    localStorage.removeItem('student_registration');
+    sessionStorage.removeItem('pending_registration');
+
     const registration = this.loginForm.controls.registration.value.trim();
 
     try {
-      const student = await firstValueFrom(
-        this.apiService.post<Partial<StudentProfile>, { registration: string }>('auth/login', {
-          registration,
-        })
+      // 1. Tenta buscar diretamente por ID / matrícula
+      const user = await firstValueFrom(
+        this.apiService.get<StudentProfile>(`students/${registration}`)
       );
 
-      if (this.hasCompleteProfile(student)) {
-        await this.router.navigate(['/dashboard'], { state: { student } });
-      } else {
-        // Existe, mas falta algum dado -> vai para criação/completar cadastro
+      await this.enterDashboard(user);
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 404) {
+        // 2. Fallback: busca na listagem caso o endpoint /students/{id} aceite apenas ID numérico
+        try {
+          const response = await firstValueFrom(
+            this.apiService.get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
+          );
+          const list = Array.isArray(response) ? response : (response?.items ?? response?.data ?? []);
+          const found = list.find((s) => String(s.registration).trim() === registration);
+
+          if (found) {
+            await this.enterDashboard(found);
+            return;
+          }
+        } catch {
+          // Segue para registro se não existir na listagem
+        }
+
+        // 3. Não existe na base -> libera /register exclusivamente para cadastro de aluno
+        sessionStorage.setItem('pending_registration', registration);
         await this.router.navigate(['/register'], {
-          state: { registration, existingStudent: student },
+          state: { registration },
         });
+      } else {
+        this.errorMessage.set('Não foi possível conectar ao servidor. Verifique a API.');
       }
-    } catch {
-      // Usuário não encontrado (404) -> vai para criação de usuário
-      await this.router.navigate(['/register'], {
-        state: { registration },
-      });
     } finally {
       this.isLoading.set(false);
     }
   }
 
-  private hasCompleteProfile(student: Partial<StudentProfile> | null | undefined): boolean {
-    if (!student) return false;
-    return Boolean(
-      student.full_name?.trim() &&
-      student.avatar?.trim() &&
-      student.course?.trim() &&
-      student.turn?.trim() &&
-      student.room?.trim() &&
-      student.proffesor?.trim()
-    );
+  private async enterDashboard(user: StudentProfile): Promise<void> {
+    localStorage.setItem('current_user', JSON.stringify(user));
+    localStorage.setItem('student_id', String(user.id ?? user.registration));
+    localStorage.setItem('student_registration', String(user.registration));
+
+    const targetRoute = user.professor === true ? '/dashboard-professor' : '/dashboard';
+    await this.router.navigate([targetRoute], { state: { student: user } });
   }
 }

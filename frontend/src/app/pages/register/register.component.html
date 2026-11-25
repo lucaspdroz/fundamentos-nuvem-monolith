@@ -16,22 +16,32 @@
       <form [formGroup]="registerForm" (ngSubmit)="onSubmit()" class="inner-form-card" novalidate>
         <div class="field-group">
           <label for="full_name">full_name</label>
-          <input id="full_name" type="text" formControlName="full_name" placeholder="Seu nome completo" />
+          <input
+            id="full_name"
+            type="text"
+            formControlName="full_name"
+            placeholder="Seu nome completo"
+          />
         </div>
 
         <div class="field-group">
           <label for="avatar">avatar</label>
-          <input id="avatar" type="text" formControlName="avatar" placeholder="Emoji ou URL da imagem" />
-        </div>
-
-        <div class="field-group">
-          <label for="presence">presence (datetime)</label>
-          <input id="presence" type="datetime-local" formControlName="presence" />
+          <input
+            id="avatar"
+            type="text"
+            formControlName="avatar"
+            placeholder="Emoji ou URL da imagem"
+          />
         </div>
 
         <div class="field-group">
           <label for="course">course</label>
-          <input id="course" type="text" formControlName="course" placeholder="Ex: Engenharia de Software" />
+          <input
+            id="course"
+            type="text"
+            formControlName="course"
+            placeholder="Ex: Engenharia de Software"
+          />
         </div>
 
         <div class="field-group">
@@ -50,7 +60,12 @@
 
         <div class="field-group">
           <label for="proffesor">proffesor</label>
-          <input id="proffesor" type="text" formControlName="proffesor" placeholder="Nome do professor" />
+          <input
+            id="proffesor"
+            type="text"
+            formControlName="proffesor"
+            placeholder="Nome do professor"
+          />
         </div>
 
         <div class="field-group">
@@ -59,7 +74,7 @@
         </div>
 
         @if (errorMessage()) {
-          <p class="error-msg">{{ errorMessage() }}</p>
+          <p class="error-msg" role="alert">{{ errorMessage() }}</p>
         }
 
         <button type="submit" class="btn-save" [disabled]="isSubmitting()">

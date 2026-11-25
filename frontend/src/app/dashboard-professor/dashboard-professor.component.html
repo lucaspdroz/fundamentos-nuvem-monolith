@@ -1,0 +1,82 @@
+
+<main class="prof-screen">
+  <div class="mobile-frame">
+    <!-- Cabeçalho do Professor -->
+    <header class="prof-header">
+      <div class="prof-identity">
+        <div class="avatar-circle">
+          @if (professor()?.avatar?.startsWith('http')) {
+            <img [src]="professor()?.avatar" alt="Avatar do professor" />
+          } @else {
+            <span>{{ professor()?.avatar || '🧉' }}</span>
+          }
+        </div>
+        <div class="prof-info">
+          <div class="name-row">
+            <h1>{{ professor()?.full_name || 'Professor' }}</h1>
+            <span class="role-badge">Docente</span>
+          </div>
+          <p>{{ professor()?.course || 'Turma Ativa' }} • {{ professor()?.turn || 'Noite' }}</p>
+        </div>
+      </div>
+
+      <button type="button" class="btn-logout" (click)="logout()" title="Sair">
+        Sair
+      </button>
+    </header>
+
+    <!-- Grid Superior: Calendário + Resumo de Chamada -->
+    <section class="widgets-grid">
+      <article class="widget-card calendar-card">
+        <mat-calendar [dateClass]="dateClass" />
+      </article>
+
+      <article class="widget-card stats-card">
+        <h2 class="widget-title">Chamada Hoje</h2>
+        <div class="stats-box">
+          <span class="stats-number">{{ presentCount() }}/{{ totalStudents() }}</span>
+          <span class="stats-label">alunos presentes</span>
+        </div>
+        <div class="stats-pill">
+          {{ selectedDate().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) }}
+        </div>
+      </article>
+    </section>
+
+    <!-- Lista de Alunos da Turma -->
+    <section class="students-panel" aria-label="Lista de chamada da turma">
+      <div class="panel-header">
+        <h3>Diário de Classe</h3>
+        <span class="hint-text">Toque para alternar</span>
+      </div>
+
+      <div class="students-scroll">
+        @for (student of classStudents(); track student.registration) {
+          <div
+            class="student-row"
+            [class.is-present]="student.presentToday"
+            (click)="toggleStudentPresence(student)"
+          >
+            <div class="student-left">
+              <span class="student-avatar">{{ student.avatar }}</span>
+              <div class="student-details">
+                <span class="student-name">{{ student.full_name }}</span>
+                <span class="student-reg">Matrícula: {{ student.registration }}</span>
+              </div>
+            </div>
+
+            <div class="student-right">
+              @if (student.presentToday) {
+                <span class="status-badge present">
+                  Presente {{ student.lastCheckIn ? '(' + formatTime(student.lastCheckIn) + ')' : '' }}
+                </span>
+              } @else {
+                <span class="status-badge absent">Ausente</span>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    </section>
+  </div>
+</main>

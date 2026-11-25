@@ -1,15 +1,31 @@
 import { Component, OnInit, ViewChild, computed, inject, signal } from '@angular/core';
-import { MatCalendar, MatDatepickerModule, MatCalendarCellClassFunction } from '@angular/material/datepicker';
+import {
+  MatCalendar,
+  MatDatepickerModule,
+  MatCalendarCellClassFunction,
+} from '@angular/material/datepicker';
 import { provideNativeDateAdapter } from '@angular/material/core';
 import { Observable, of, delay } from 'rxjs';
 import { ApiService } from '../../services/api.service';
-import { AttendanceRecord, ReminderNotification, StudentData } from '../../models/student.model';
+import {
+  AttendanceRecord,
+  ReminderNotification,
+  StudentData,
+  StudentProfile,
+} from '../../models/student.model';
+
+interface PresenceApiItem {
+  id: number;
+  presence: string;
+  room: string;
+  created_at: string;
+}
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
   imports: [MatDatepickerModule],
-  providers: [provideNativeDateAdapter()], // Usa o Date nativo do JavaScript
+  providers: [provideNativeDateAdapter()],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })
@@ -24,17 +40,21 @@ export class DashboardComponent implements OnInit {
   readonly showAbsenceAlert = signal(false);
   readonly slideProgress = signal(0);
 
+  private currentRoom = 'Sala Padrão';
+  private currentCourse = 'Aula';
+
   readonly totalAbsences = computed(() => {
     const list = this.student()?.attendanceList ?? [];
     return list.filter((item) => !item.present && !this.isSameDay(item.date, new Date())).length;
   });
 
   readonly isTodayConfirmed = computed(() => {
-    const today = this.student()?.attendanceList.find((item) => this.isSameDay(item.date, new Date()));
+    const today = this.student()?.attendanceList.find((item) =>
+      this.isSameDay(item.date, new Date())
+    );
     return today?.present ?? false;
   });
 
-  // Função chamada pelo MatCalendar para cada dia (Date)
   readonly dateClass: MatCalendarCellClassFunction<Date> = (cellDate, view) => {
     if (view !== 'month') return '';
 
@@ -42,7 +62,6 @@ export class DashboardComponent implements OnInit {
       this.isSameDay(item.date, cellDate)
     );
 
-    // Se não é dia de aula, deixa neutro/apagado para focar nos dias letivos
     if (!record) return 'day-non-class';
 
     const isToday = this.isSameDay(cellDate, new Date());
@@ -69,22 +88,90 @@ export class DashboardComponent implements OnInit {
     );
   }
 
+  private normalizePresencesResponse(response: unknown): PresenceApiItem[] {
+    if (Array.isArray(response)) {
+      return response;
+    }
+
+    if (response && typeof response === 'object') {
+      const obj = response as Record<string, unknown>;
+      if (Array.isArray(obj['presences'])) return obj['presences'];
+      if (Array.isArray(obj['items'])) return obj['items'];
+      if (Array.isArray(obj['data'])) return obj['data'];
+      if (Array.isArray(obj['results'])) return obj['results'];
+    }
+
+    return [];
+  }
+
+  private mapApiPresencesToRecords(rawResponse: unknown): AttendanceRecord[] {
+    const items = this.normalizePresencesResponse(rawResponse);
+    const today = new Date();
+
+    const mapped: AttendanceRecord[] = items.map((item) => {
+      const itemDate = new Date(item.presence);
+      return {
+        id: String(item.id),
+        date: itemDate,
+        className: `${this.currentCourse} (${item.room})`,
+        present: true,
+        isToday: this.isSameDay(itemDate, today),
+      };
+    });
+
+    const hasTodayRecord = mapped.some((rec) => this.isSameDay(rec.date, today));
+    if (!hasTodayRecord) {
+      mapped.push({
+        id: 'today-pending',
+        date: today,
+        className: `${this.currentCourse} (${this.currentRoom})`,
+        present: false,
+        isToday: true,
+      });
+    }
+
+    return mapped.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }
+
   private loadStudentData(): void {
-    const registration = (history.state as { student?: { registration?: string } })?.student
-      ?.registration;
-    this.apiService.get<StudentData>(`students/${registration}/presences`).subscribe({
-      next: (data) => {
-        // Garante conversão caso a API retorne string ISO
-        data.attendanceList = data.attendanceList.map((item) => ({
-          ...item,
-          date: new Date(item.date),
-        }));
-        this.student.set(data);
+    const state = history.state as { student?: Partial<StudentProfile> };
+    const stateStudent = state?.student;
+
+    const registration = String(
+      stateStudent?.registration ||
+      stateStudent?.id ||
+      localStorage.getItem('student_id') ||
+      ''
+    );
+
+    if (stateStudent?.room) this.currentRoom = stateStudent.room;
+    if (stateStudent?.course) this.currentCourse = stateStudent.course;
+
+    if (!registration) {
+      this.student.set(this.getFallbackStudentData());
+      this.calendar?.updateTodaysDate();
+      this.checkAbsenceThreshold();
+      return;
+    }
+
+    // GET /api/v1/students/{registration}/presences
+    this.apiService.get<PresenceApiItem[]>(`students/${registration}/presences`).subscribe({
+      next: (presences) => {
+        const attendanceList = this.mapApiPresencesToRecords(presences ?? []);
+
+        this.student.set({
+          id: String(stateStudent?.id ?? registration),
+          name: stateStudent?.full_name ?? 'Aluno',
+          registration,
+          avatarUrl: stateStudent?.avatar?.startsWith('http') ? stateStudent.avatar : undefined,
+          attendanceList,
+        });
+
         this.calendar?.updateTodaysDate();
         this.checkAbsenceThreshold();
       },
       error: () => {
-        this.student.set(this.getFallbackStudentData());
+        this.student.set(this.getFallbackStudentData(registration, stateStudent?.full_name));
         this.calendar?.updateTodaysDate();
         this.checkAbsenceThreshold();
       },
@@ -111,35 +198,44 @@ export class DashboardComponent implements OnInit {
     const currentStudent = this.student();
     if (!currentStudent || this.isTodayConfirmed() || this.isCheckingIn()) return;
 
-    const todayRecord = currentStudent.attendanceList.find((item) =>
-      this.isSameDay(item.date, new Date())
-    );
-    if (!todayRecord) return;
-
     this.isCheckingIn.set(true);
 
+    // POST /api/v1/students/{registration}/presences com body { "room": "string" }
     this.apiService
-      .update<AttendanceRecord, { present: boolean }>(
-        `students/${currentStudent.id}/attendance/${todayRecord.id}`,
-        { present: true }
+      .post<PresenceApiItem, { room: string }>(
+        `students/${currentStudent.registration}/presences`,
+        { room: this.currentRoom }
       )
       .subscribe({
-        next: () => this.markTodayAsPresent(todayRecord.id),
-        error: () => this.markTodayAsPresent(todayRecord.id),
+        next: (created) => this.confirmTodayPresence(created),
+        error: () => this.confirmTodayPresence(),
       });
   }
 
-  private markTodayAsPresent(recordId: string): void {
+  private confirmTodayPresence(created?: PresenceApiItem): void {
+    const today = new Date();
+
     this.student.update((current) => {
       if (!current) return null;
+
       return {
         ...current,
         attendanceList: current.attendanceList.map((item) =>
-          item.id === recordId ? { ...item, present: true, absenceReason: undefined } : item
+          this.isSameDay(item.date, today)
+            ? {
+                ...item,
+                id: created ? String(created.id) : item.id,
+                date: created ? new Date(created.presence) : today,
+                className: created ? `${this.currentCourse} (${created.room})` : item.className,
+                present: true,
+                absenceReason: undefined,
+              }
+            : item
         ),
       };
     });
-    // Força o MatCalendar a reavaliar o dateClass (vermelho -> verde mate)
+
+    // Atualiza o MatCalendar para trocar a cor do dia atual de vermelho para verde-mate
     this.calendar?.updateTodaysDate();
     this.isCheckingIn.set(false);
   }
@@ -163,7 +259,7 @@ export class DashboardComponent implements OnInit {
     return new Date(date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
   }
 
-  private getFallbackStudentData(): StudentData {
+  private getFallbackStudentData(registration = '20261045', name = 'Lucas'): StudentData {
     const today = new Date();
     const makeDate = (offsetDays: number) => {
       const d = new Date(today);
@@ -172,18 +268,18 @@ export class DashboardComponent implements OnInit {
     };
 
     return {
-      id: 'stu-01',
-      name: 'Lucas',
-      registration: '20261045',
+      id: registration,
+      name,
+      registration,
       attendanceList: [
-        { id: '1', date: makeDate(-14), className: 'Engenharia de Software', present: true },
-        { id: '2', date: makeDate(-12), className: 'Inteligência Artificial', present: false, absenceReason: 'Atestado médico' },
-        { id: '3', date: makeDate(-10), className: 'Sistemas Operacionais', present: false, absenceReason: 'Imprevisto no transporte' },
-        { id: '4', date: makeDate(-7), className: 'Redes de Computadores', present: false, absenceReason: 'Não justificada' },
-        { id: '5', date: makeDate(-5), className: 'DevOps & Cloud', present: false, absenceReason: 'Não justificada' },
-        { id: '6', date: makeDate(-3), className: 'Segurança da Informação', present: false, absenceReason: 'Não justificada' },
-        { id: '7', date: makeDate(-1), className: 'Arquitetura Web', present: false, absenceReason: 'Não justificada' },
         { id: '8', date: makeDate(0), className: 'Banco de Dados', present: false, isToday: true },
+        { id: '7', date: makeDate(-1), className: 'Arquitetura Web', present: false, absenceReason: 'Não justificada' },
+        { id: '6', date: makeDate(-3), className: 'Segurança da Informação', present: false, absenceReason: 'Não justificada' },
+        { id: '5', date: makeDate(-5), className: 'DevOps & Cloud', present: false, absenceReason: 'Não justificada' },
+        { id: '4', date: makeDate(-7), className: 'Redes de Computadores', present: false, absenceReason: 'Não justificada' },
+        { id: '3', date: makeDate(-10), className: 'Sistemas Operacionais', present: false, absenceReason: 'Imprevisto no transporte' },
+        { id: '2', date: makeDate(-12), className: 'Inteligência Artificial', present: false, absenceReason: 'Atestado médico' },
+        { id: '1', date: makeDate(-14), className: 'Engenharia de Software', present: true },
       ],
     };
   }
