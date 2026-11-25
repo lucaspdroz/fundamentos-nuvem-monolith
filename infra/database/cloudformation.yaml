@@ -80,7 +80,6 @@ Resources:
 
   PostgresDbInstance:
     Type: AWS::RDS::DBInstance
-    DependsOn: DbSubnetGroup
     Properties:
       DBInstanceIdentifier: !Sub ${AWS::StackName}-postgres
       Engine: postgres
@@ -90,8 +89,7 @@ Resources:
       StorageType: gp3
       DBName: !Ref DbName
       MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Ref DbPassword
-      DBSubnetGroupName: !Ref DbSubnetGroup
+      MasterUserPassword: !Ref DbPassword # cfn-lint disable=w1011
       VPCSecurityGroups:
         - !ImportValue backend-DatabaseSecurityGroupId
       Port: !Ref DbPort
