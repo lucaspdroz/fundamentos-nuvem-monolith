@@ -52,45 +52,17 @@ export class RegisterComponent implements OnInit {
   });
 
   ngOnInit(): void {
-    const state = history.state as {
-      registration?: string;
-      existingStudent?: Partial<StudentProfile>;
-    };
-
+    const state = history.state as { registration?: string };
     this.registration = String(
-      state?.registration || localStorage.getItem('student_id') || ''
-    );
+      state?.registration || sessionStorage.getItem('pending_registration') || ''
+    ).trim();
 
     if (!this.registration) {
       this.router.navigate(['/']);
-      return;
-    }
-
-    const storedPartial = sessionStorage.getItem('partial_student');
-    const existing: Partial<StudentProfile> | undefined =
-      state?.existingStudent ?? (storedPartial ? JSON.parse(storedPartial) : undefined);
-
-    if (existing && Object.keys(existing).length > 0) {
-      this.existingNumericId = existing.id;
-      this.isProfessor = Boolean(existing.professor);
-      this.existingCreatedAt = existing.created_at ? new Date(existing.created_at) : this.now;
-
-      this.registerForm.patchValue({
-        full_name: existing.full_name ?? '',
-        avatar: existing.avatar ?? '🧉',
-        presence: existing.presence
-          ? this.toDateTimeLocalString(new Date(existing.presence))
-          : this.toDateTimeLocalString(this.now),
-        course: existing.course ?? '',
-        turn: existing.turn ?? 'Noite',
-        room: existing.room ?? '',
-        proffesor: existing.proffesor ?? '',
-        created_at: this.formatDisplayDate(this.existingCreatedAt),
-      });
     }
   }
 
-  async onSubmit(): Promise<void> {
+async onSubmit(): Promise<void> {
     if (this.registerForm.invalid || this.isSubmitting()) {
       this.registerForm.markAllAsTouched();
       return;
@@ -107,33 +79,26 @@ export class RegisterComponent implements OnInit {
       avatar: raw.avatar.trim(),
       course: raw.course.trim(),
       turn: raw.turn,
-      professor: this.isProfessor,
+      professor: false, // Registro exclusivo para aluno
       room: raw.room.trim(),
       proffesor: raw.proffesor.trim(),
       presence: new Date(raw.presence).toISOString(),
     };
 
     try {
-      const savedStudent =
-        this.existingNumericId !== undefined
-          ? await firstValueFrom(
-              this.apiService.update<StudentProfile, StudentUpsertPayload>(
-                `students/${this.existingNumericId}`,
-                payload
-              )
-            )
-          : await firstValueFrom(
-              this.apiService.post<StudentProfile, StudentUpsertPayload>('students', payload)
-            );
+      const savedStudent = await firstValueFrom(
+        this.apiService.post<StudentProfile, StudentUpsertPayload>('students', payload)
+      );
 
       await this.finishAndRedirect(savedStudent);
     } catch (error) {
       if (error instanceof HttpErrorResponse && error.status === 409) {
         try {
-          const allStudents = await firstValueFrom(
-            this.apiService.get<StudentProfile[]>('students')
+          const response = await firstValueFrom(
+            this.apiService.get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
           );
-          const existing = allStudents?.find((s) => s.registration === this.registration);
+          const list = Array.isArray(response) ? response : (response?.items ?? response?.data ?? []);
+          const existing = list.find((s) => String(s.registration).trim() === this.registration);
 
           if (existing) {
             await this.finishAndRedirect(existing);
@@ -151,16 +116,24 @@ export class RegisterComponent implements OnInit {
     } finally {
       this.isSubmitting.set(false);
     }
-  }
+}
 
   private async finishAndRedirect(user: StudentProfile): Promise<void> {
-    sessionStorage.removeItem('partial_student');
-    localStorage.setItem('student_id', String(user.id ?? this.registration));
-    localStorage.setItem('student_registration', user.registration ?? this.registration);
+    const normalizedUser: StudentProfile = {
+      ...user,
+      professor: Boolean(user.professor),
+    };
 
-    const targetRoute = user.professor ? '/dashboard-professor' : '/dashboard';
+    sessionStorage.removeItem('pending_registration');
+    sessionStorage.removeItem('partial_student');
+
+    localStorage.setItem('current_user', JSON.stringify(normalizedUser));
+    localStorage.setItem('student_id', String(normalizedUser.id ?? this.registration));
+    localStorage.setItem('student_registration', String(normalizedUser.registration ?? this.registration));
+
+    const targetRoute = normalizedUser.professor ? '/dashboard-professor' : '/dashboard';
     await this.router.navigate([targetRoute], {
-      state: { student: user },
+      state: { student: normalizedUser },
     });
   }
 

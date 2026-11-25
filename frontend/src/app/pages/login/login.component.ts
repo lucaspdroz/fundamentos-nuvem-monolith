@@ -34,37 +34,41 @@ export class LoginComponent {
     this.isLoading.set(true);
     this.errorMessage.set(null);
 
+    // Limpa estado anterior antes de validar a nova matrícula
+    localStorage.removeItem('current_user');
+    localStorage.removeItem('student_id');
+    localStorage.removeItem('student_registration');
+    sessionStorage.removeItem('pending_registration');
+
     const registration = this.loginForm.controls.registration.value.trim();
 
     try {
-      // 1. Busca a lista de usuários e filtra pela matrícula (registration)
-      const response = await firstValueFrom(
-        this.apiService.get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
+      // 1. Tenta buscar diretamente por ID / matrícula
+      const user = await firstValueFrom(
+        this.apiService.get<StudentProfile>(`students/${registration}`)
       );
 
-      const studentsList = Array.isArray(response)
-        ? response
-        : (response?.items ?? response?.data ?? []);
-
-      const found = studentsList.find(
-        (s) => String(s.registration).trim() === registration
-      );
-
-      if (found) {
-        await this.redirectUser(found);
-        return;
-      }
-
-      // Matrícula não encontrada na lista -> vai para cadastro
-      localStorage.setItem('student_id', registration);
-      localStorage.setItem('student_registration', registration);
-      await this.router.navigate(['/register'], {
-        state: { registration },
-      });
+      await this.enterDashboard(user);
     } catch (error) {
       if (error instanceof HttpErrorResponse && error.status === 404) {
-        localStorage.setItem('student_id', registration);
-        localStorage.setItem('student_registration', registration);
+        // 2. Fallback: busca na listagem caso o endpoint /students/{id} aceite apenas ID numérico
+        try {
+          const response = await firstValueFrom(
+            this.apiService.get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
+          );
+          const list = Array.isArray(response) ? response : (response?.items ?? response?.data ?? []);
+          const found = list.find((s) => String(s.registration).trim() === registration);
+
+          if (found) {
+            await this.enterDashboard(found);
+            return;
+          }
+        } catch {
+          // Segue para registro se não existir na listagem
+        }
+
+        // 3. Não existe na base -> libera /register exclusivamente para cadastro de aluno
+        sessionStorage.setItem('pending_registration', registration);
         await this.router.navigate(['/register'], {
           state: { registration },
         });
@@ -76,11 +80,12 @@ export class LoginComponent {
     }
   }
 
-  private async redirectUser(user: StudentProfile): Promise<void> {
+  private async enterDashboard(user: StudentProfile): Promise<void> {
+    localStorage.setItem('current_user', JSON.stringify(user));
     localStorage.setItem('student_id', String(user.id ?? user.registration));
     localStorage.setItem('student_registration', String(user.registration));
 
-    const targetRoute = user.professor ? '/dashboard-professor' : '/dashboard';
+    const targetRoute = user.professor === true ? '/dashboard-professor' : '/dashboard';
     await this.router.navigate([targetRoute], { state: { student: user } });
   }
 }

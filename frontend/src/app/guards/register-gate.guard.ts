@@ -1,21 +1,11 @@
 import { inject } from '@angular/core';
-import { CanActivateFn, Router } from '@angular/router';
+import { CanActivateFn, Router, UrlTree } from '@angular/router';
 import { HttpErrorResponse } from '@angular/common/http';
-import { catchError, map, of } from 'rxjs';
+import { Observable, catchError, map, of } from 'rxjs';
 import { ApiService } from '../services/api.service';
 import { StudentProfile } from '../models/student.model';
 
-function hasCompleteProfile(user: Partial<StudentProfile> | null | undefined): boolean {
-  if (!user) return false;
-  return Boolean(
-    user.full_name?.trim() &&
-    user.avatar?.trim() &&
-    user.course?.trim() &&
-    user.turn?.trim()
-  );
-}
-
-export const registerGateGuard: CanActivateFn = () => {
+export const registerGateGuard: CanActivateFn = (): Observable<boolean | UrlTree> | UrlTree => {
   const apiService = inject(ApiService);
   const router = inject(Router);
 
@@ -23,34 +13,60 @@ export const registerGateGuard: CanActivateFn = () => {
     | { registration?: string }
     | undefined;
 
-  const studentId = navState?.registration || localStorage.getItem('student_id') || '';
+  const identifier = String(
+    navState?.registration ||
+    localStorage.getItem('student_registration') ||
+    localStorage.getItem('student_id') ||
+    ''
+  ).trim();
 
-  // Sem matrícula informada -> bloqueia /register e volta para o login
-  if (!studentId) {
+  if (!identifier) {
     return router.createUrlTree(['/']);
   }
 
-  // Faz o GET /api/v1/students/{student_id} para validar o gate
-  return apiService.get<Partial<StudentProfile>>(`students/${studentId}`).pipe(
-    map((user) => {
-      if (hasCompleteProfile(user)) {
-        // Usuário já existe e está completo -> redireciona para o dashboard correto
-        const target = user.professor ? '/dashboard-professor' : '/dashboard';
-        return router.createUrlTree([target]);
-      }
+  const resolveUserRedirect = (user: Partial<StudentProfile>): UrlTree => {
+    localStorage.setItem('student_id', String(user.id ?? identifier));
+    localStorage.setItem('student_registration', String(user.registration ?? identifier));
+    localStorage.setItem('current_user', JSON.stringify(user));
+    sessionStorage.removeItem('partial_student');
 
-      // Usuário existe mas faltam dados -> libera acesso ao /register e guarda dados parciais
-      sessionStorage.setItem('partial_student', JSON.stringify(user));
-      return true;
-    }),
+    const target = user.professor === true ? '/dashboard-professor' : '/dashboard';
+    return router.createUrlTree([target]);
+  };
+
+  // 1. Tenta buscar diretamente em GET /api/v1/students/{identifier}
+  return apiService.get<Partial<StudentProfile>>(`students/${identifier}`).pipe(
+    map((user) => resolveUserRedirect(user)),
     catchError((error: unknown) => {
-      // 404 (usuário não existe) -> libera acesso ao /register para criação
       if (error instanceof HttpErrorResponse && error.status === 404) {
-        sessionStorage.removeItem('partial_student');
-        return of(true);
+        // 2. Se deu 404 (porque identifier é 'registration' e não o 'id' numérico),
+        // busca na listagem GET /api/v1/students
+        return apiService
+          .get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
+          .pipe(
+            map((res) => {
+              const list = Array.isArray(res) ? res : (res?.items ?? res?.data ?? []);
+              const found = list.find(
+                (u) =>
+                  String(u.registration).trim() === identifier ||
+                  String(u.id).trim() === identifier
+              );
+
+              if (found) {
+                return resolveUserRedirect(found);
+              }
+
+              // Realmente não existe na base -> libera /register para cadastro
+              sessionStorage.removeItem('partial_student');
+              return true;
+            }),
+            catchError(() => {
+              sessionStorage.removeItem('partial_student');
+              return of(true);
+            })
+          );
       }
 
-      // Erro de rede/servidor -> volta para o login
       return of(router.createUrlTree(['/']));
     })
   );

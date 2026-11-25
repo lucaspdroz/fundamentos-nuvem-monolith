@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Observable, catchError, forkJoin, map, of, switchMap } from 'rxjs';
 import { Router } from '@angular/router';
 import {
   MatDatepickerModule,
@@ -7,6 +7,7 @@ import {
 import { provideNativeDateAdapter } from '@angular/material/core';
 import { ApiService } from '../services/api.service';
 import { StudentProfile } from '../models/student.model';
+import { Component, computed, inject, OnInit, signal } from '@angular/core';
 
 export interface ClassStudentRow {
   id: string | number;
@@ -15,6 +16,13 @@ export interface ClassStudentRow {
   avatar: string;
   presentToday: boolean;
   lastCheckIn?: Date;
+}
+
+interface PresenceApiItem {
+  id: number;
+  presence: string;
+  room: string;
+  created_at: string;
 }
 
 @Component({
@@ -32,6 +40,7 @@ export class DashboardProfessorComponent implements OnInit {
   readonly professor = signal<Partial<StudentProfile> | null>(null);
   readonly classStudents = signal<ClassStudentRow[]>([]);
   readonly selectedDate = signal<Date>(new Date());
+  readonly isLoadingClass = signal(false);
 
   readonly presentCount = computed(
     () => this.classStudents().filter((s) => s.presentToday).length
@@ -49,40 +58,103 @@ export class DashboardProfessorComponent implements OnInit {
     this.loadProfessorAndClass();
   }
 
+  onDateSelected(date: Date | null): void {
+    if (!date) return;
+    this.selectedDate.set(date);
+    this.loadClassStudents(this.professor());
+  }
+
   private loadProfessorAndClass(): void {
     const state = history.state as { student?: Partial<StudentProfile> };
+    const storedUserRaw = localStorage.getItem('current_user');
+    const cachedProf: Partial<StudentProfile> | null = storedUserRaw
+      ? JSON.parse(storedUserRaw)
+      : null;
+
+    const initialProf = state?.student ?? cachedProf;
     const storedId = localStorage.getItem('student_id') ?? '';
 
-    if (state?.student) {
-      this.professor.set(state.student);
-    } else if (storedId) {
-      this.apiService.get<StudentProfile>(`students/${storedId}`).subscribe({
-        next: (prof) => this.professor.set(prof),
-      });
+    if (initialProf) {
+      this.professor.set(initialProf);
+      localStorage.setItem('current_user', JSON.stringify(initialProf));
     }
 
-    // Busca a lista de alunos da turma (com fallback mockado caso o endpoint ainda não exista)
-    this.apiService.get<StudentProfile[]>('students').subscribe({
-      next: (allUsers) => {
-        const currentCourse = this.professor()?.course;
-        const studentsOnly: ClassStudentRow[] = (allUsers ?? [])
-          .filter((u) => !u.professor && (!currentCourse || u.course === currentCourse))
-          .map((u) => ({
-            id: u.id ?? u.registration,
-            registration: u.registration,
-            full_name: u.full_name,
-            avatar: u.avatar || '🎓',
-            presentToday: false,
-          }));
+    // 1. Garante os dados atualizados do professor ANTES de filtrar a turma
+    const professor$: Observable<Partial<StudentProfile> | null> = initialProf
+      ? of(initialProf)
+      : storedId
+        ? this.apiService.get<StudentProfile>(`students/${storedId}`).pipe(
+            catchError(() => of(null))
+          )
+        : of(null);
 
-        this.classStudents.set(
-          studentsOnly.length > 0 ? studentsOnly : this.getMockedClassStudents()
-        );
-      },
-      error: () => {
-        this.classStudents.set(this.getMockedClassStudents());
-      },
+    this.isLoadingClass.set(true);
+
+    professor$.subscribe((prof) => {
+      if (prof) {
+        this.professor.set(prof);
+        localStorage.setItem('current_user', JSON.stringify(prof));
+      }
+      this.loadClassStudents(prof);
     });
+  }
+
+  private loadClassStudents(prof: Partial<StudentProfile> | null): void {
+    const targetDate = this.selectedDate();
+
+    this.apiService
+      .get<StudentProfile[] | { items?: StudentProfile[]; data?: StudentProfile[] }>('students')
+      .pipe(
+        switchMap((res) => {
+          const allUsers = Array.isArray(res) ? res : (res?.items ?? res?.data ?? []);
+          const currentCourse = prof?.course?.trim().toLowerCase();
+
+          const filteredStudents = allUsers.filter(
+            (u) =>
+              !u.professor &&
+              (!currentCourse || u.course?.trim().toLowerCase() === currentCourse)
+          );
+
+          if (filteredStudents.length === 0) {
+            return of(this.getMockedClassStudents());
+          }
+
+          // Consulta as presenças reais de cada aluno na data selecionada
+          const studentChecks$ = filteredStudents.map((u) =>
+            this.apiService.get<PresenceApiItem[]>(`students/${u.registration}/presences`).pipe(
+              map((presences) => {
+                const list = Array.isArray(presences) ? presences : [];
+                const match = list.find((p) => this.isSameDay(new Date(p.presence), targetDate));
+
+                return {
+                  id: u.id ?? u.registration,
+                  registration: u.registration,
+                  full_name: u.full_name,
+                  avatar: u.avatar || '🎓',
+                  presentToday: Boolean(match),
+                  lastCheckIn: match ? new Date(match.presence) : undefined,
+                } satisfies ClassStudentRow;
+              }),
+              catchError(() =>
+                of({
+                  id: u.id ?? u.registration,
+                  registration: u.registration,
+                  full_name: u.full_name,
+                  avatar: u.avatar || '🎓',
+                  presentToday: false,
+                } satisfies ClassStudentRow)
+              )
+            )
+          );
+
+          return forkJoin(studentChecks$);
+        }),
+        catchError(() => of(this.getMockedClassStudents()))
+      )
+      .subscribe((rows) => {
+        this.classStudents.set(rows);
+        this.isLoadingClass.set(false);
+      });
   }
 
   toggleStudentPresence(student: ClassStudentRow): void {
@@ -102,7 +174,9 @@ export class DashboardProfessorComponent implements OnInit {
 
     if (updatedStatus) {
       this.apiService
-        .post(`students/${student.registration}/presences`, { room: 'Sala Professor' })
+        .post(`students/${student.registration}/presences`, {
+          room: this.professor()?.room || 'Sala Professor',
+        })
         .subscribe({ error: () => {} });
     }
   }
@@ -114,14 +188,19 @@ export class DashboardProfessorComponent implements OnInit {
 
   logout(): void {
     localStorage.removeItem('student_id');
+    localStorage.removeItem('student_registration');
+    localStorage.removeItem('current_user');
+    sessionStorage.removeItem('partial_student');
     this.router.navigate(['/']);
   }
 
   private isSameDay(a: Date, b: Date): boolean {
+    const d1 = new Date(a);
+    const d2 = new Date(b);
     return (
-      a.getFullYear() === b.getFullYear() &&
-      a.getMonth() === b.getMonth() &&
-      a.getDate() === b.getDate()
+      d1.getFullYear() === d2.getFullYear() &&
+      d1.getMonth() === d2.getMonth() &&
+      d1.getDate() === d2.getDate()
     );
   }
 

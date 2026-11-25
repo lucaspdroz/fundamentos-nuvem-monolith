@@ -1,0 +1,416 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  classMate - Frontend Angular em EC2 Multi-AZ,
+  Docker, ECR e Application Load Balancer publico.
+
+Parameters:
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Tag da imagem Angular no ECR.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: Tipo das EC2 do frontend.
+
+  KeyName:
+    Type: String
+    Default: vockey
+    Description: Key pair para SSH. Deixe vazio para nao usar.
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Instance profile existente no Learner Lab.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI Amazon Linux 2023 mais recente.
+
+  BackendStackName:
+    Type: String
+    Default: classmate-backend
+    Description: Nome da stack que exporta a VPC e o ApiUrl.
+
+  FrontendPort:
+    Type: Number
+    Default: 80
+    Description: Porta HTTP do Nginx.
+
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Rota de health check do frontend.
+
+  FrontendAllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR autorizado a acessar o frontend.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Logs
+  # ---------------------------------------------------------------------------
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /classmate/${AWS::StackName}/frontend
+      RetentionInDays: 7
+
+  # ---------------------------------------------------------------------------
+  # ECR
+  # ---------------------------------------------------------------------------
+
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-frontend
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,
+          "description":"Manter as 10 imagens mais recentes",
+          "selection":{"tagStatus":"any",
+          "countType":"imageCountMoreThan","countNumber":10},
+          "action":{"type":"expire"}}]}
+
+  # ---------------------------------------------------------------------------
+  # Security Groups
+  # ---------------------------------------------------------------------------
+
+  FrontendAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB publico do frontend Angular
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${BackendStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref FrontendAllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-alb-sg
+
+  FrontendInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Angular acessivel somente pelo ALB
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${BackendStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref FrontendPort
+          ToPort: !Ref FrontendPort
+          SourceSecurityGroupId: !Ref FrontendAlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-sg
+
+  # ---------------------------------------------------------------------------
+  # EC2 - Frontend A
+  # ---------------------------------------------------------------------------
+
+  FrontendInstanceA:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - FrontendLogGroup
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+
+      KeyName: !If
+        - HasKeyName
+        - !Ref KeyName
+        - !Ref AWS::NoValue
+
+      IamInstanceProfile: !Ref InstanceProfileName
+
+      SubnetId:
+        Fn::Select:
+          - 0
+          - Fn::Split:
+              - ","
+              - Fn::ImportValue:
+                  Fn::Sub: "${BackendStackName}-PublicSubnetIds"
+
+      SecurityGroupIds:
+        - !Ref FrontendInstanceSecurityGroup
+
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+
+              dnf install -y docker
+              systemctl enable --now docker
+
+              mkdir -p /opt/classmate/frontend
+
+              cat > /opt/classmate/frontend/deploy.sh <<'SCRIPT'
+              #!/bin/bash
+              set -euo pipefail
+
+              IMAGE="$1"
+              API_URL="$2"
+
+              aws ecr get-login-password --region ${AWS::Region} \
+                | docker login \
+                  --username AWS \
+                  --password-stdin \
+                  ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+              docker pull "$IMAGE"
+
+              docker rm -f classmate-frontend || true
+
+              docker run -d \
+                --name classmate-frontend \
+                --restart unless-stopped \
+                -p ${FrontendPort}:80 \
+                -e API_URL="$API_URL" \
+                --log-driver awslogs \
+                --log-opt awslogs-region=${AWS::Region} \
+                --log-opt awslogs-group=${FrontendLogGroup} \
+                --log-opt awslogs-stream=frontend-a \
+                "$IMAGE"
+
+              docker image prune -f
+              SCRIPT
+
+              chmod +x /opt/classmate/frontend/deploy.sh
+
+              /opt/classmate/frontend/deploy.sh \
+                ${FrontendRepository.RepositoryUri}:${ImageTag} \
+                "${BackendApiUrl}" \
+                || echo "Imagem ainda nao publicada no ECR; o pipeline fara o deploy"
+
+            - BackendApiUrl:
+                Fn::ImportValue:
+                  Fn::Sub: "${BackendStackName}-ApiUrl"
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-frontend-a
+
+  # ---------------------------------------------------------------------------
+  # EC2 - Frontend B
+  # ---------------------------------------------------------------------------
+
+  FrontendInstanceB:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - FrontendLogGroup
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+
+      KeyName: !If
+        - HasKeyName
+        - !Ref KeyName
+        - !Ref AWS::NoValue
+
+      IamInstanceProfile: !Ref InstanceProfileName
+
+      SubnetId:
+        Fn::Select:
+          - 1
+          - Fn::Split:
+              - ","
+              - Fn::ImportValue:
+                  Fn::Sub: "${BackendStackName}-PublicSubnetIds"
+
+      SecurityGroupIds:
+        - !Ref FrontendInstanceSecurityGroup
+
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+
+              dnf install -y docker
+              systemctl enable --now docker
+
+              mkdir -p /opt/classmate/frontend
+
+              cat > /opt/classmate/frontend/deploy.sh <<'SCRIPT'
+              #!/bin/bash
+              set -euo pipefail
+
+              IMAGE="$1"
+              API_URL="$2"
+
+              aws ecr get-login-password --region ${AWS::Region} \
+                | docker login \
+                  --username AWS \
+                  --password-stdin \
+                  ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+              docker pull "$IMAGE"
+
+              docker rm -f classmate-frontend || true
+
+              docker run -d \
+                --name classmate-frontend \
+                --restart unless-stopped \
+                -p ${FrontendPort}:80 \
+                -e API_URL="$API_URL" \
+                --log-driver awslogs \
+                --log-opt awslogs-region=${AWS::Region} \
+                --log-opt awslogs-group=${FrontendLogGroup} \
+                --log-opt awslogs-stream=frontend-b \
+                "$IMAGE"
+
+              docker image prune -f
+              SCRIPT
+
+              chmod +x /opt/classmate/frontend/deploy.sh
+
+              /opt/classmate/frontend/deploy.sh \
+                ${FrontendRepository.RepositoryUri}:${ImageTag} \
+                "${BackendApiUrl}" \
+                || echo "Imagem ainda nao publicada no ECR; o pipeline fara o deploy"
+
+            - BackendApiUrl:
+                Fn::ImportValue:
+                  Fn::Sub: "${BackendStackName}-ApiUrl"
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-frontend-b
+
+  # ---------------------------------------------------------------------------
+  # Application Load Balancer - Publico
+  # ---------------------------------------------------------------------------
+
+  FrontendLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-alb
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${BackendStackName}-PublicSubnetIds"
+      SecurityGroups:
+        - !Ref FrontendAlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-alb
+
+  # ---------------------------------------------------------------------------
+  # Target Group
+  # ---------------------------------------------------------------------------
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-tg
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${BackendStackName}-VpcId"
+
+      Protocol: HTTP
+      Port: !Ref FrontendPort
+      TargetType: instance
+
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+      Matcher:
+        HttpCode: "200"
+
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+      Targets:
+        - Id: !Ref FrontendInstanceA
+          Port: !Ref FrontendPort
+
+        - Id: !Ref FrontendInstanceB
+          Port: !Ref FrontendPort
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-tg
+
+  # ---------------------------------------------------------------------------
+  # HTTP Listener
+  # ---------------------------------------------------------------------------
+
+  FrontendHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref FrontendLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+Outputs:
+
+  FrontendUrl:
+    Description: URL publica do frontend Angular
+    Value: !Sub "http://${FrontendLoadBalancer.DNSName}"
+
+  FrontendRepositoryUri:
+    Description: Repositorio ECR do frontend
+    Value: !GetAtt FrontendRepository.RepositoryUri
+
+  FrontendInstanceIds:
+    Description: EC2 utilizadas pelo pipeline de deploy
+    Value: !Join
+      - ","
+      - - !Ref FrontendInstanceA
+        - !Ref FrontendInstanceB
+
+  FrontendTargetGroupArn:
+    Description: Target Group do frontend
+    Value: !Ref FrontendTargetGroup
+
+  FrontendAlbDnsName:
+    Description: DNS do Application Load Balancer
+    Value: !GetAtt FrontendLoadBalancer.DNSName
+
+  FrontendSecurityGroupId:
+    Description: Security Group das EC2 do frontend
+    Value: !Ref FrontendInstanceSecurityGroup
+
+  FrontendLogGroupName:
+    Description: CloudWatch Log Group do frontend
+    Value: !Ref FrontendLogGroup
+
+  BackendApiUrl:
+    Description: URL interna importada do backend
+    Value:
+      Fn::ImportValue:
+        Fn::Sub: "${BackendStackName}-ApiUrl"
