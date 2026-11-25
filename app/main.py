@@ -10,8 +10,6 @@ from src.core.config import settings
 from src.core.logger import setup_logging
 from src.database.connection import Base, engine
 from src.middlewares.error_handler import ErrorHandlerMiddleware
-from src.models.presences import presence  # noqa: F401
-from src.models.students import student  # noqa: F401
 
 setup_logging()
 
